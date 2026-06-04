@@ -1,0 +1,98 @@
+{
+  "nodes": {
+    "graphicsgd-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1769509698,
+        "narHash": "sha256-UIIq1jDbTZq1Kt0NydzPnfF0ll3nlbCb02U/F7yACd0=",
+        "owner": "quaadgras",
+        "repo": "graphics.gd",
+        "rev": "07c79b4a08fdce43fc830e3fcd959c98cdfa6a2b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "quaadgras",
+        "repo": "graphics.gd",
+        "rev": "07c79b4a08fdce43fc830e3fcd959c98cdfa6a2b",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1780203844,
+        "narHash": "sha256-K5sT4jTpGs15ADhviMKNBH38REpPf5Q6mM1+N6cArVE=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "b51242d7d43689db2f3be91bd05d5b24fbb469c4",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-26.05",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs-recent": {
+      "locked": {
+        "lastModified": 1779357205,
+        "narHash": "sha256-cCO8aTqss5x9Ky8GWkpY0Hy5fyTZEbtifSUV8QjSzic=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "f83fc3c307e74bc5fd5adb7eb6b8b13ffd2a36e1",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "polyfill-glibc-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1730295238,
+        "narHash": "sha256-Qkzy33dIGnv9BOmRwql+LpYaEukZZIADSux09Fz3h7E=",
+        "owner": "corsix",
+        "repo": "polyfill-glibc",
+        "rev": "dd59051faaa10ee63c1b96f1b47bf9fcd3770ee2",
+        "type": "github"
+      },
+      "original": {
+        "owner": "corsix",
+        "repo": "polyfill-glibc",
+        "rev": "dd59051faaa10ee63c1b96f1b47bf9fcd3770ee2",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "graphicsgd-src": "graphicsgd-src",
+        "nixpkgs-recent": "nixpkgs-recent",
+        "polyfill-glibc-src": "polyfill-glibc-src",
+        "unpins-lib": "unpins-lib"
+      }
+    },
+    "unpins-lib": {
+      "inputs": {
+        "nixpkgs": "nixpkgs"
+      },
+      "locked": {
+        "lastModified": 1780576916,
+        "narHash": "sha256-SuQDkwiG2g/qiQAFZy7PJwmepL8hvgoWlI0DJYwwPpI=",
+        "owner": "unpins",
+        "repo": "nix-lib",
+        "rev": "e39619149463f11e4b456a6902c48672514b9362",
+        "type": "github"
+      },
+      "original": {
+        "owner": "unpins",
+        "repo": "nix-lib",
+        "type": "github"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
