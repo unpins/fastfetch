@@ -49,6 +49,16 @@
       name = "fastfetch";
       smoke = [ "--version" ];
       smokePattern = "fastfetch";
+      # Scoped per-package exception to the darwin portability allow-list.
+      # fastfetch's macOS backend weak-links two Apple PrivateFrameworks that
+      # have no public equivalent: DisplayServices (builtin-display brightness)
+      # and MediaRemote (the now-playing Media module). action-build's verify
+      # step permits exactly these two private frameworks for this package
+      # only — the strict default (public Frameworks + libSystem + libobjc)
+      # is unchanged for every other catalog package. Symbols are weak-import
+      # and NULL-guarded, so the features degrade gracefully if a macOS update
+      # ever removes the framework.
+      darwinAllowPrivateFrameworks = [ "DisplayServices" "MediaRemote" ];
       build = pkgs:
         let
           # Native build (incl. CI's aarch64 arm runner): build==host, so
@@ -804,6 +814,19 @@
           # provider on darwin — has no pkgsStatic build (badPlatforms), so
           # the Vulkan device-name line is off; the GPU is still detected via
           # IOKit/Metal in fastfetch's apple GPU module.
+          #
+          # fastfetch's macOS backend weak-links two Apple *PrivateFrameworks*
+          # — DisplayServices (builtin-display brightness) and MediaRemote
+          # (the now-playing Media module). The unpins darwin portability
+          # contract normally allows only public /System/Library/Frameworks/*,
+          # but these two genuinely have no public equivalent. Rather than drop
+          # the features, fastfetch is granted a *scoped, per-package* exception
+          # via `darwinAllowPrivateFrameworks` (declared at the mkStandaloneFlake
+          # call below): the action-build portability check permits exactly
+          # these two private frameworks for this package only — every other
+          # package's contract stays strict. The symbols are FF_A_WEAK_IMPORT
+          # + NULL-guarded, so they degrade gracefully if a future macOS drops
+          # the framework.
           postFixup = ''
             if [ -e $out/bin/.fastfetch-wrapped ]; then
               mv -f $out/bin/.fastfetch-wrapped $out/bin/fastfetch

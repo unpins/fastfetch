@@ -76,7 +76,14 @@ the one case that genuinely needs it.
 
 - **macOS** reads everything through Apple frameworks (CoreFoundation, IOKit,
   SystemConfiguration, sysctl) — no dlopen trampoline needed; those frameworks
-  are allowed to stay dynamic per the project's dynamic-link policy.
+  are allowed to stay dynamic per the project's dynamic-link policy. Two macOS
+  features have no public-framework path and rely on Apple *private* frameworks:
+  built-in-display brightness (`DisplayServices`) and the now-playing **Media**
+  module (`MediaRemote`). To keep these working the binary links those two
+  private frameworks, granted as a narrow per-package exception to the
+  portability contract — they are weak-linked and every call site is
+  null-guarded, so the features degrade quietly to "unavailable" if a future
+  macOS removes the framework rather than breaking the binary.
 
 - No upstream features are disabled beyond the GPU compute/render APIs on the
   four secondary Linux cross targets noted above.
