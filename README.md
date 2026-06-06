@@ -70,12 +70,3 @@ reserves `dlopen` for the one case that needs it — the GPU driver.
   have no public-framework path, so the binary weak-links those two *private*
   frameworks as a narrow per-package exception; every call site is null-guarded,
   degrading to "unavailable" rather than breaking if a future macOS drops them.
-
-## Future: Windows port
-
-Not on the roadmap. fastfetch's Windows support is a separate Win32 backend (WMI,
-registry, DXGI, NT APIs) that Cosmopolitan can't provide, and the Linux backend
-would report nothing on Windows (no `/proc` or `/sys`). A real
-`x86_64-w64-mingw32` cross is the path — feasible, but linking the WMI/DXGI/PEB
-surface statically under mingw is a project of its own. Contributions welcome —
-open an issue first.
