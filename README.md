@@ -47,26 +47,15 @@ The [Releases](https://github.com/unpins/fastfetch/releases) page has standalone
 
 ## Build notes
 
-fastfetch probes the system through many optional libraries that upstream loads
-with `dlopen` at runtime. A single static binary can't depend on those being
-present on the host, so this build links almost everything **statically** and
-reserves `dlopen` for the one case that needs it — the GPU driver.
+fastfetch probes the system through many libraries that upstream `dlopen`s at
+runtime. This build links them **statically** instead — the only thing left
+dynamic is the machine-specific GPU driver (Vulkan/OpenCL loaders, NVIDIA/Moore-Threads
+management libs); GPU name/vendor still resolves without a driver via sysfs and an
+embedded `pci.ids`.
 
-- **Self-contained except the GPU driver.** Image/logo rendering, the display
-  server (XCB/XRandR/Wayland), DRM, D-Bus, GSettings (GLib plus an embedded
-  static dconf backend, so theme/icon/font detection reads the real dconf
-  databases without the host `libgio`), ddcutil, libelf and zlib are all linked
-  in. Only the host GPU stack — Vulkan/OpenCL loaders and the
-  NVIDIA/Moore-Threads management libraries — stays dynamic, since it's
-  machine-specific. GPU name/vendor still resolves with no driver present, via
-  `/sys/class/drm` and an embedded `pci.ids`.
-- **Linux on six arches** (x86_64, aarch64, i686, ppc64le, riscv64, armv7l). The
-  Vulkan/OpenCL dlopen runs through a TLS-swap trampoline that only has asm for
-  x86_64/aarch64, so on the other four GPU compute/render API detail is the one
-  feature left out — GPU name via sysfs still works.
-- **macOS** reads everything through Apple frameworks (CoreFoundation, IOKit,
-  SystemConfiguration), kept dynamic per the dynamic-link policy. Built-in-display
-  brightness (`DisplayServices`) and the now-playing Media module (`MediaRemote`)
-  have no public-framework path, so the binary weak-links those two *private*
-  frameworks as a narrow per-package exception; every call site is null-guarded,
-  degrading to "unavailable" rather than breaking if a future macOS drops them.
+- **Linux** ships for six arches (x86_64, aarch64, i686, ppc64le, riscv64, armv7l). GPU
+  compute/render API detail needs a TLS-swap trampoline that only exists for x86_64/aarch64,
+  so it's the one feature missing on the other four.
+- **macOS** uses Apple frameworks. Two features (display brightness, now-playing Media) rely
+  on *private* frameworks, weak-linked as a per-package exception and null-guarded so they
+  degrade to "unavailable" rather than break on a future macOS.
