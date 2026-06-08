@@ -1,12 +1,12 @@
 # fastfetch
 
-Standalone build of [fastfetch](https://github.com/fastfetch-cli/fastfetch).
+[fastfetch](https://github.com/fastfetch-cli/fastfetch) as a single self-contained binary, built natively for Linux and macOS.
 
 [![CI](https://github.com/unpins/fastfetch/actions/workflows/fastfetch.yml/badge.svg)](https://github.com/unpins/fastfetch/actions)
 ![Linux](https://img.shields.io/badge/Linux-✓-success?logo=linux&logoColor=white)
 ![macOS](https://img.shields.io/badge/macOS-✓-success?logo=apple&logoColor=white)
 
-Part of the [unpins](https://unpins.org) project — native single-binary builds with no third-party runtime dependencies.
+Part of the [unpins](https://unpins.org) catalog; install it with [`unpin`](https://github.com/unpins/unpin): `unpin install fastfetch`.
 
 ## Usage
 
@@ -21,6 +21,10 @@ To install it onto your PATH:
 ```bash
 unpin install fastfetch
 ```
+
+## Man pages
+
+`fastfetch.1` is embedded in the binary — read it with `unpin man fastfetch`.
 
 ## Build locally
 
@@ -40,10 +44,6 @@ The first invocation will offer to add the [unpins.cachix.org](https://unpins.ca
 ## Manual download
 
 The [Releases](https://github.com/unpins/fastfetch/releases) page has standalone binaries for manual download.
-
-## Man pages
-
-`fastfetch.1` is embedded in the binary — read it with `unpin man fastfetch`.
 
 ## Build notes
 
