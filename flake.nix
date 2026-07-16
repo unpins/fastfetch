@@ -47,6 +47,16 @@
     unpins-lib.lib.mkStandaloneFlake {
       inherit self;
       name = "fastfetch";
+      # Build fastfetch + its whole pkgsStatic dep closure (glib/GObject,
+      # imagemagick, chafa, vulkan-loader, ocl-icd, dconf, wayland, ddcutil, …)
+      # through the unpin-llvm engine: every object LLVM bitcode, whole-program
+      # LTO into one static 0-DT_NEEDED binary. `build` receives an engine-
+      # swapped pkgs whose `pkgsStatic` IS the bitcode set, so the `p`/`pd`/
+      # `dconfStatic`/`tlsTrampoline` derivations fold under the engine
+      # automatically. The glibc/musl foreign-dlopen helpers stay off-engine
+      # (they use recentPkgs.stdenv / pkgsCross.musl64, not pkgsStatic) — they
+      # must remain real dynamic ELFs run as separate processes at runtime.
+      engine = "unpin-llvm";
       smoke = [ "--version" ];
       smokePattern = "fastfetch";
       # Scoped per-package exception to the darwin portability allow-list.
@@ -660,10 +670,30 @@
           # decl). Reuse the catalog's shared nativeFix — same one avif /
           # libwebp / jpeg-tools apply, gated to riscv — which drops only the
           # unused helper and keeps the RVV SIMD in libjpeg.a. Identity off riscv.
-          libjpegturboOverlay = final: prev:
-            prev.lib.optionalAttrs prev.stdenv.hostPlatform.isRiscV {
-              libjpeg = unpins-lib.lib.nativeFixes."libjpeg-turbo" prev;
-            };
+          libjpegturboOverlay = final: prev: {
+            # riscv: shared nativeFix drops the miscompiled simdcoverage helper.
+            # all arches under the engine: its installCheck (doInstallCheck, NOT
+            # doCheck) runs `make test`, whose bmpsizetest is a huge-allocation
+            # integer-overflow probe the loaded builder OOM-kills ("Subprocess
+            # killed"); the 331 SIMD-correctness tests pass, so libjpeg.a is
+            # sound — the killed test is a build-time self-test, not a functional
+            # gate (same rationale as libultrahdr above). fastfetch decodes
+            # JPEG, never BMP.
+            libjpeg = (if prev.stdenv.hostPlatform.isRiscV
+              then unpins-lib.lib.nativeFixes."libjpeg-turbo" prev
+              else prev.libjpeg).overrideAttrs (_: { doInstallCheck = false; });
+          };
+          # libx11 has an XORG_PROG_RAWCPP configure probe that feeds the raw
+          # C preprocessor no input; the engine cc-wrapper's `cpp` errors out
+          # ("no input files") and libx11 aborts ("defines unix with or without
+          # -undef"). Point RAWCPP at the plain build-host cpp (honors -undef);
+          # libx11 still links in as a static .a. Same fix sox uses. Linux-only
+          # (darwin's closure doesn't pull libx11).
+          libx11Overlay = final: prev: {
+            libx11 = prev.libx11.overrideAttrs (_: {
+              RAWCPP = "${final.buildPackages.stdenv.cc}/bin/cpp";
+            });
+          };
           p = pkgs.pkgsStatic.extend (final: prev:
             (ddcutilOverlay final prev)
             // (chafaOverlay final prev)
@@ -673,6 +703,7 @@
             // (potraceOverlay final prev)
             // (libultrahdrOverlay final prev)
             // (libjpegturboOverlay final prev)
+            // (libx11Overlay final prev)
           );
           dropDeps = [
             "libpulseaudio" "dconf"
@@ -707,7 +738,10 @@
           # with zero host .so. dconf_register_static_gsettings_backend() is an
           # exported helper we append (G_DEFINE_TYPE's get_type is hidden, and
           # the stock g_io_module_load derefs a GTypeModule → crashes on NULL).
-          dconfStatic = pkgs.pkgsStatic.dconf.overrideAttrs (o: {
+          # Built from `p` (not raw pkgsStatic) so dconf's dbus -> libx11 dep
+          # inherits the libx11 RAWCPP overlay; otherwise a second, un-overridden
+          # libx11 leaks into the closure and fails the XORG_PROG_RAWCPP probe.
+          dconfStatic = p.dconf.overrideAttrs (o: {
             pname = "dconf-static-libs";
             outputs = [ "out" ];
             meta = (o.meta or { }) // { badPlatforms = [ ]; };
@@ -761,6 +795,11 @@
           # needs (chafa + imagemagick for logo rendering; potrace pulled by
           # imagemagick). None of the Linux foreign-dlopen / dconf / vulkan-
           # loader / wayland machinery applies on darwin, so it is left out.
+          withDarwinBuildCC = drv: drv.overrideAttrs (o: {
+            preConfigure = (o.preConfigure or "") + ''
+              export CC_FOR_BUILD=$CC
+            '';
+          });
           pd = pkgs.pkgsStatic.extend (final: prev:
             (chafaOverlay final prev)
             // (imagemagickOverlay final prev)
@@ -780,6 +819,26 @@
               fontconfig = unpins-lib.lib.nativeFixes.fontconfig prev;
               pango      = unpins-lib.lib.nativeFixes.pango      prev;
               cairo      = unpins-lib.lib.nativeFixes.cairo      prev;
+              # sqlite (autosetup jimsh0) and gmp (configure's CC_FOR_BUILD
+              # probe) both build a host tool with CC_FOR_BUILD. Under the
+              # engine pkgsStatic leaves CC_FOR_BUILD at the vanilla darwin cc
+              # wrapper, which drives ELF ld.lld and can't emit a runnable
+              # Mach-O host tool → sqlite's jimsh0 dies silently ("Cannot find
+              # a tclsh"), gmp aborts ("Specified CC_FOR_BUILD doesn't seem to
+              # work"). Native darwin build == host, so $CC IS the builder cc
+              # (links via ld64.lld). Same fix php applies to sqlite/gmp.
+              sqlite = withDarwinBuildCC prev.sqlite;
+              # gmp also needs the disable-fat/disable-assembly drop: its
+              # hand-written x86_64 mpn asm (x86_64_add_n.o/sub_n.o) emits a
+              # rel8 BRANCH that Mach-O ld64.lld rejects ("BRANCH relocation
+              # has width 1 bytes, must be 4"). Fall back to gmp's generic C
+              # mpn (functionally identical, nothing disabled). --disable-fat
+              # because configure refuses --disable-assembly while fat is on.
+              # Same fix php applies.
+              gmp = withDarwinBuildCC (prev.gmp.overrideAttrs (o: {
+                configureFlags = (o.configureFlags or [ ])
+                  ++ [ "--disable-fat" "--disable-assembly" ];
+              }));
             }
           );
 
@@ -804,7 +863,14 @@
         # bootstrap — python3 is foundational). The reference is only a path
         # string in completion files the bin-only artifact doesn't ship.
         # Linux pkgsStatic python3 is fine, so this is darwin-only.
-        ((pd.fastfetch.override { python3 = pkgs.buildPackages.python3; }).overrideAttrs (old: {
+        # apple-sdk_15 = null: fastfetch buildInputs apple-sdk_15 (macosDeps),
+        # which under pkgsStatic is apple-sdk-static — whose Csu crt is a
+        # `clang -r` Mach-O relocatable link the engine's lld can't do (only
+        # cctools ld does -r). The engine links crt-less and gets every SDK
+        # header/framework via SDKROOT (-isysroot/-F), so this buildInput is
+        # redundant. nix-lib's generic appleSdkOverride targets `apple-sdk`, not
+        # the `apple-sdk_15` param fastfetch happens to use, so drop it here.
+        ((pd.fastfetch.override { python3 = pkgs.buildPackages.python3; apple-sdk_15 = null; }).overrideAttrs (old: {
           # darwin: fastfetch's macOS backend reads system info via Apple
           # frameworks (CoreFoundation/IOKit/SystemConfiguration/...) from
           # apple-sdk + sysctl — no foreign-dlopen trampoline needed (the
@@ -827,6 +893,12 @@
           # package's contract stays strict. The symbols are FF_A_WEAK_IMPORT
           # + NULL-guarded, so they degrade gracefully if a future macOS drops
           # the framework.
+          # Disable the wrap (see Linux branches): wrapProgram =
+          # makeBinaryWrapper compiles a Mach-O wrapper we discard anyway; the
+          # shipped artifact must be the bare Mach-O (otool-L allowlist). No
+          # wrap → no makeBinaryWrapper compile.
+          postInstall = "";
+          dontWrapGApps = true;
           postFixup = ''
             if [ -e $out/bin/.fastfetch-wrapped ]; then
               mv -f $out/bin/.fastfetch-wrapped $out/bin/fastfetch
@@ -848,12 +920,25 @@
         }))
         else if useDlopen
         then
-        (p.fastfetch.overrideAttrs (old: {
-          # nixpkgs wraps fastfetch with `makeWrapper` for system-PATH
-          # niceties (pciutils/dmidecode lookup, etc) — that wrapper is
-          # dynamically linked and points at /nix/store paths absent on
-          # the user's host. Move the real static binary on top of it
-          # so the shipped artifact is the bare ELF.
+        # python3 overridden to the plain build-host interpreter (like the
+        # darwin branch): under the engine pkgsStatic.python3 is a CPython
+        # --with-lto build that demands a standalone llvm-ar the engine cc
+        # doesn't expose. fastfetch only bakes ${python3.interpreter} into
+        # shell completions the bin-only artifact never ships.
+        ((p.fastfetch.override { python3 = pkgs.buildPackages.python3; }).overrideAttrs (old: {
+          # nixpkgs wraps fastfetch (LD_LIBRARY_PATH prefix via wrapProgram,
+          # plus wrapGAppsHook) — pointless for a static 0-DT_NEEDED binary,
+          # and the wrapper was discarded below anyway. Disable it: under the
+          # engine `wrapProgram` = makeBinaryWrapper, which compiles the C
+          # wrapper with `-x c` from stdin; the engine cc then appends the
+          # sysroot crt objects into that still-open `-x c` scope, so clang
+          # tries to *compile* crt1.o (-Werror,-Wnull-character on its ELF
+          # bytes) and the build dies. No wrapper built → no such compile.
+          postInstall = "";
+          dontWrapGApps = true;
+          # Defensive: if any hook still binary-wraps, keep the bare static
+          # ELF as the shipped artifact (the wrapper points at absent
+          # /nix/store paths). No-op once the wrap is disabled above.
           postFixup = ''
             if [ -e $out/bin/.fastfetch-wrapped ]; then
               mv -f $out/bin/.fastfetch-wrapped $out/bin/fastfetch
@@ -922,10 +1007,18 @@
             sed -i '1i #define FF_DISABLE_DLOPEN 1' src/detection/lm/lm_linux.c
             sed -i '1i #define FF_DISABLE_DLOPEN 1' src/common/impl/networking_common.c
             # MagickCore.a pulls C++ transitive deps (e.g. libultrahdr), so the
-            # otherwise-C binary needs the C++ runtime — -lstdc++ last so it
-            # resolves the C++ archives' std::/operator new/vtable refs.
+            # otherwise-C binary needs the C++ runtime. Under the engine that is
+            # libc++ (not libstdc++, absent from the sysroot). It is NOT added
+            # here: a bare -lc++ is what flips the unpin driver's C++-link
+            # detection (which then emits --start-group -lc++ -lc++abi -lunwind
+            # --end-group), but the cc-wrapper rewrites every non "-L/" entry of
+            # NIX_LDFLAGS to "-Wl,<flag>", so "-lc++" would reach the driver as
+            # "-Wl,-lc++" — invisible to the detector and unresolved by ld (it
+            # even breaks the CMake C-compiler check). Instead -lc++ is passed
+            # bare via CMAKE_EXE_LINKER_FLAGS below (cmake puts it straight on
+            # the link line). MagickCore's -L/-l still ride NIX_LDFLAGS fine.
             r10Logo="$($PKG_CONFIG --static --libs-only-L chafa zlib MagickCore) $($PKG_CONFIG --static --libs-only-l chafa zlib MagickCore)"
-            export NIX_LDFLAGS="$NIX_LDFLAGS $r10Logo -lstdc++"
+            export NIX_LDFLAGS="$NIX_LDFLAGS $r10Logo"
 
             # Round 10 (cont.): the remaining self-contained libs the binary
             # used to dlopen from the host. Each leaf TU loads exactly one of
@@ -1021,6 +1114,11 @@
             "-DENABLE_IMAGEMAGICK7=On"
             "-DENABLE_IMAGEMAGICK6=Off"
             "-DENABLE_CHAFA=On"
+            # Bare -lc++ (not via NIX_LDFLAGS — see preConfigure) so the engine
+            # cc driver detects a C++ link and pulls libc++/libc++abi/libunwind
+            # for MagickCore.a's C++ deps. cmake places it directly on the link
+            # line, unwrapped, unlike NIX_LDFLAGS' "-Wl,"-prefixed entries.
+            "-DCMAKE_EXE_LINKER_FLAGS=-lc++"
           ];
         }))
         else
@@ -1038,7 +1136,19 @@
         # GPU name/vendor still resolves here via /sys/class/drm + the
         # embedded pci.ids (libdrm-free path), so only GPU compute/render API
         # detail is lost on these arches.
-        (p.fastfetch.overrideAttrs (old: {
+        # python3 overridden to the plain build-host interpreter (like the
+        # darwin branch): under the engine pkgsStatic.python3 is a CPython
+        # --with-lto build that demands a standalone llvm-ar the engine cc
+        # doesn't expose. fastfetch only bakes ${python3.interpreter} into
+        # shell completions the bin-only artifact never ships.
+        ((p.fastfetch.override { python3 = pkgs.buildPackages.python3; }).overrideAttrs (old: {
+          # Disable the wrap (see useDlopen branch): under the engine
+          # wrapProgram = makeBinaryWrapper, whose `-x c` stdin compile makes
+          # the cc append the sysroot crt objects into the open `-x c` scope,
+          # so clang tries to compile crt1.o and fails. Useless here anyway —
+          # static 0-DT_NEEDED binary, and the wrapper was discarded below.
+          postInstall = "";
+          dontWrapGApps = true;
           postFixup = ''
             if [ -e $out/bin/.fastfetch-wrapped ]; then
               mv -f $out/bin/.fastfetch-wrapped $out/bin/fastfetch
@@ -1086,9 +1196,13 @@
             awk '/^int main\(int argc, char\*\* argv\)/{print; getline; print; print "    { extern void dconf_register_static_gsettings_backend(void); dconf_register_static_gsettings_backend(); }"; next} {print}' \
               src/fastfetch.c > src/fastfetch.c.new && mv src/fastfetch.c.new src/fastfetch.c
             gtkLibs="$($PKG_CONFIG --static --libs-only-L gio-2.0 gio-unix-2.0 sqlite3) $($PKG_CONFIG --static --libs-only-l gio-2.0 gio-unix-2.0 sqlite3)"
-            # -lstdc++ last: MagickCore.a's C++ transitive deps (libultrahdr)
-            # need the C++ runtime in this otherwise-C binary.
-            export NIX_LDFLAGS="$NIX_LDFLAGS -L${dconfStatic}/lib -l:libdconfsettings.a -l:libdconf-engine.a -l:libdconf-gdbus-thread.a -l:libdconf-common.a -l:libgvdb.a -l:libdconf-shm.a $gtkLibs -lstdc++"
+            # C++ runtime (libc++) for MagickCore.a's C++ deps is passed bare
+            # via CMAKE_EXE_LINKER_FLAGS below, NOT here: the cc-wrapper "-Wl,"-
+            # prefixes every non "-L/" NIX_LDFLAGS entry, so "-lc++" would arrive
+            # as "-Wl,-lc++" and never trip the engine driver's C++-link detector
+            # (which is what pulls the c++/c++abi/unwind group). -lstdc++ isn't
+            # in the sysroot either. dconf/gtk -L/-l still ride NIX_LDFLAGS fine.
+            export NIX_LDFLAGS="$NIX_LDFLAGS -L${dconfStatic}/lib -l:libdconfsettings.a -l:libdconf-engine.a -l:libdconf-gdbus-thread.a -l:libdconf-common.a -l:libgvdb.a -l:libdconf-shm.a $gtkLibs"
           '';
           cmakeFlags = (old.cmakeFlags or [ ]) ++ [
             # link our static .a deps into the binary instead of dlopen'ing
@@ -1114,6 +1228,11 @@
             "-DENABLE_GLX=Off"
             "-DENABLE_XFCONF=Off"
             "-DENABLE_PULSE=Off"
+            # Bare -lc++ (not via NIX_LDFLAGS — see preConfigure) so the engine
+            # cc driver detects a C++ link and pulls libc++/libc++abi/libunwind
+            # for MagickCore.a's C++ deps. cmake places it directly on the link
+            # line, unwrapped, unlike NIX_LDFLAGS' "-Wl,"-prefixed entries.
+            "-DCMAKE_EXE_LINKER_FLAGS=-lc++"
           ];
         }));
     };
