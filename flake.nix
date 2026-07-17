@@ -844,14 +844,19 @@
               # Overriding gmp (a darwin stdenv requisite, spliced into
               # buildPackages on a native build) re-instantiates the base
               # bootstrap, so its build tools rebuild from source — including a
-              # fresh gnutar-1.35 whose checkPhase self-test 155 (time01.at) fails
-              # deterministically on the macos-14 runner (a filesystem-timestamp-
-              # granularity probe, not a functional gate). Disable that check on
-              # the forked gnutar only; the catalog's canonical (cached) gnutar is
-              # untouched. Linux tolerates the same fork because its rebuilt gnutar
-              # passes time01.at. See the scoped python3 arg below for the sibling
-              # "foundational package can't be overridden cleanly" note.
-              gnutar = prev.gnutar.overrideAttrs (_: { doCheck = false; });
+              # fresh gnutar-1.35 whose self-test 155 (time01.at) fails
+              # deterministically on the macos-14 aarch64 runner (a filesystem-
+              # timestamp-granularity probe, not a functional gate). gnutar runs
+              # its testsuite in BOTH checkPhase (`make check`) and
+              # installCheckPhase (`make installcheck`), so disable both on the
+              # forked gnutar only; the catalog's canonical (cached) gnutar is
+              # untouched. Linux tolerates the same fork because its rebuilt
+              # gnutar passes time01.at. See the scoped python3 arg below for the
+              # sibling "foundational package can't be overridden cleanly" note.
+              gnutar = prev.gnutar.overrideAttrs (_: {
+                doCheck = false;
+                doInstallCheck = false;
+              });
             }
           );
 
