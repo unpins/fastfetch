@@ -825,38 +825,28 @@
               fontconfig = unpins-lib.lib.nativeFixes.fontconfig prev;
               pango      = unpins-lib.lib.nativeFixes.pango      prev;
               cairo      = unpins-lib.lib.nativeFixes.cairo      prev;
-              # sqlite (autosetup jimsh0) and gmp (its gen-tool probe) both build
-              # a host codegen tool with CC_FOR_BUILD. Under pkgsStatic darwin
-              # CC_FOR_BUILD is the vanilla cc wrapper that drives ELF ld.lld and
-              # can't emit a runnable Mach-O → sqlite "Cannot find a tclsh", gmp
-              # "Specified CC_FOR_BUILD doesn't seem to work". Native darwin build
-              # == host, so $CC is the builder cc. gmp also needs --disable-fat/
-              # --disable-assembly: its x86_64 mpn asm emits a rel8 BRANCH Mach-O
-              # ld64.lld rejects (generic C mpn is identical). Same fix php uses.
-              # These MUST be set-wide: fastfetch links neither directly — both
-              # arrive as build tools via imagemagick's coreutils/glib closure,
-              # so a scoped fastfetch.override arg wouldn't reach them.
-              sqlite = withDarwinBuildCC prev.sqlite;
-              gmp = withDarwinBuildCC (prev.gmp.overrideAttrs (o: {
-                configureFlags = (o.configureFlags or [ ])
-                  ++ [ "--disable-fat" "--disable-assembly" ];
-              }));
-              # Overriding gmp (a darwin stdenv requisite, spliced into
-              # buildPackages on a native build) re-instantiates the base
-              # bootstrap, so its build tools rebuild from source — including a
-              # fresh gnutar-1.35 whose self-test 155 (time01.at) fails
-              # deterministically on the macos-14 aarch64 runner (a filesystem-
-              # timestamp-granularity probe, not a functional gate). gnutar runs
-              # its testsuite in BOTH checkPhase (`make check`) and
-              # installCheckPhase (`make installcheck`), so disable both on the
-              # forked gnutar only; the catalog's canonical (cached) gnutar is
-              # untouched. Linux tolerates the same fork because its rebuilt
-              # gnutar passes time01.at. See the scoped python3 arg below for the
-              # sibling "foundational package can't be overridden cleanly" note.
-              gnutar = prev.gnutar.overrideAttrs (_: {
-                doCheck = false;
-                doInstallCheck = false;
-              });
+              # imagemagick freezes MVDelegate/RMDelegate at ${coreutils}/bin/
+              # {mv,rm} (--with-frozenpaths). Under pkgsStatic that coreutils is
+              # coreutils-static, which links gmp-with-cxx-static, whose host
+              # gen-tool fails CC_FOR_BUILD on darwin (vanilla cc wrapper drives
+              # ELF ld.lld, can't emit a runnable Mach-O). The fix is the same
+              # CC_FOR_BUILD=$CC used elsewhere (+ --disable-fat/--disable-
+              # assembly: gmp's x86_64 mpn asm emits a rel8 branch ld64.lld
+              # rejects, generic C mpn is identical). The point is to keep it
+              # SCOPED to imagemagick's delegate coreutils: applying it set-wide
+              # overrides a darwin stdenv requisite and forks the base bootstrap
+              # → an uncached gnutar-1.35 whose test 155 (time01.at) fails on the
+              # macos-14 arm64 runner. Scoped here, the stdenv's own gmp/coreutils
+              # (native, in initialPath) are untouched, so the base gnutar stays
+              # the cached catalog build. Same principle as fastfetch's sqlite arg.
+              imagemagick = (imagemagickOverlay final prev).imagemagick.override {
+                coreutils = prev.coreutils.override {
+                  gmp = withDarwinBuildCC (prev.gmp.overrideAttrs (o: {
+                    configureFlags = (o.configureFlags or [ ])
+                      ++ [ "--disable-fat" "--disable-assembly" ];
+                  }));
+                };
+              };
             }
           );
 
@@ -888,9 +878,17 @@
         # header/framework via SDKROOT (-isysroot/-F), so this buildInput is
         # redundant. nix-lib's generic appleSdkOverride targets `apple-sdk`, not
         # the `apple-sdk_15` param fastfetch happens to use, so drop it here.
+        # sqlite = withDarwinBuildCC: fastfetch links sqlite (sqliteSupport,
+        # package counting) → sqlite-static, whose autosetup builds a jimsh0
+        # host tool with CC_FOR_BUILD. Under pkgsStatic-darwin CC_FOR_BUILD is
+        # the vanilla cc wrapper driving ELF ld.lld → "Cannot find a tclsh".
+        # Native darwin build == host, so $CC is the builder cc. Scoped to
+        # fastfetch's sqlite arg (php-style), NOT set-wide: a set-wide sqlite
+        # override is a darwin stdenv requisite and forks the base bootstrap.
         ((pd.fastfetch.override {
           python3 = pkgs.buildPackages.python3;
           apple-sdk_15 = null;
+          sqlite = withDarwinBuildCC pd.sqlite;
         }).overrideAttrs (old: {
           # darwin: fastfetch's macOS backend reads system info via Apple
           # frameworks (CoreFoundation/IOKit/SystemConfiguration/...) from
