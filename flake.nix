@@ -622,13 +622,19 @@
               fftwSupport = false;
             }).overrideAttrs (old:
               # darwin: imagemagick still links libxml2.a (core config
-              # parsing), whose encoding.o references iconv_open. On darwin
-              # iconv lives in a separate libiconv (not libc as on glibc/musl),
-              # and imagemagick's static link omits -liconv -> "_iconv_open
-              # symbol(s) not found". Add libiconv + -liconv. darwin-only;
-              # linux/musl carry iconv in libc so this stays off there.
+              # parsing), whose encoding.o references iconv, and imagemagick's
+              # static link omits -liconv. It has to be GNU libiconv
+              # (`libiconvReal`), for two independent reasons: nixpkgs' plain
+              # `libiconv` on darwin is Apple's, which installs only bin/iconv
+              # and the charset tables — no lib/ at all, so `-liconv` had
+              # nothing to resolve against; and nix-lib's darwinIconvConverge
+              # hands GNU's header to libxml2 on the engine scopes, so
+              # encoding.o asks for the PREFIXED `libiconv_open`/
+              # `libiconv_close`/`libiconv`. GNU's archive defines both
+              # spellings, so it satisfies either. darwin-only; linux/musl
+              # carry iconv in libc so this stays off there.
               prev.lib.optionalAttrs prev.stdenv.hostPlatform.isDarwin {
-                buildInputs = (old.buildInputs or [ ]) ++ [ final.libiconv ];
+                buildInputs = (old.buildInputs or [ ]) ++ [ final.libiconvReal ];
                 NIX_LDFLAGS = (old.NIX_LDFLAGS or "") + " -liconv";
               });
           };
@@ -665,23 +671,15 @@
               cmakeFlags = (old.cmakeFlags or [ ]) ++ [ "-DUHDR_ENABLE_INTRINSICS=0" ];
             });
           };
-          # libjpeg-turbo (pulled via imagemagick's JPEG reader) miscompiles its
-          # `simdcoverage` helper on riscv64 (RVV port misses a jsimd_can_*
-          # decl). Reuse the catalog's shared nativeFix — same one avif /
-          # libwebp / jpeg-tools apply, gated to riscv — which drops only the
-          # unused helper and keeps the RVV SIMD in libjpeg.a. Identity off riscv.
+          # libjpeg-turbo (pulled via imagemagick's JPEG reader) runs `make test`
+          # as its installCheck (doInstallCheck, NOT doCheck), and its
+          # bmpsizetest is a huge-allocation integer-overflow probe the loaded
+          # builder OOM-kills ("Subprocess killed"); the 331 SIMD-correctness
+          # tests pass, so libjpeg.a is sound — the killed test is a build-time
+          # self-test, not a functional gate (same rationale as libultrahdr
+          # above). fastfetch decodes JPEG, never BMP.
           libjpegturboOverlay = final: prev: {
-            # riscv: shared nativeFix drops the miscompiled simdcoverage helper.
-            # all arches under the engine: its installCheck (doInstallCheck, NOT
-            # doCheck) runs `make test`, whose bmpsizetest is a huge-allocation
-            # integer-overflow probe the loaded builder OOM-kills ("Subprocess
-            # killed"); the 331 SIMD-correctness tests pass, so libjpeg.a is
-            # sound — the killed test is a build-time self-test, not a functional
-            # gate (same rationale as libultrahdr above). fastfetch decodes
-            # JPEG, never BMP.
-            libjpeg = (if prev.stdenv.hostPlatform.isRiscV
-              then unpins-lib.lib.nativeFixes."libjpeg-turbo" prev
-              else prev.libjpeg).overrideAttrs (_: { doInstallCheck = false; });
+            libjpeg = prev.libjpeg.overrideAttrs (_: { doInstallCheck = false; });
           };
           # libx11 has an XORG_PROG_RAWCPP configure probe that feeds the raw
           # C preprocessor no input; the engine cc-wrapper's `cpp` errors out
@@ -795,11 +793,27 @@
           # needs (chafa + imagemagick for logo rendering; potrace pulled by
           # imagemagick). None of the Linux foreign-dlopen / dconf / vulkan-
           # loader / wayland machinery applies on darwin, so it is left out.
-          withDarwinBuildCC = drv: drv.overrideAttrs (o: {
-            preConfigure = (o.preConfigure or "") + ''
-              export CC_FOR_BUILD=$CC
-            '';
-          });
+          # pkgsStatic-darwin's own CC_FOR_BUILD is a cc wrapper driving ELF
+          # ld.lld, so a package that compiles and RUNS a host gen-tool (gmp,
+          # sqlite's jimsh) can't produce a runnable Mach-O with it. Point
+          # CC_FOR_BUILD at $CC instead — valid only because build == host
+          # there. Under a cross set that equality is exactly what's false:
+          # $CC targets the foreign arch, jimsh comes out arm64 and the x86_64
+          # builder can't run it ("./jimsh was built without -DHAVE_REALPATH").
+          # nixpkgs already wires a correct build-host CC_FOR_BUILD when
+          # cross-compiling, so gate on native and leave cross alone. Every
+          # real target (x86_64-darwin, and aarch64-darwin native on macos-14)
+          # is native, so this is identity on all of them — it only lets the
+          # local ../build-aarch64-darwin cross check run.
+          withDarwinBuildCC = drv:
+            if !(pkgs.pkgsStatic.stdenv.buildPlatform.canExecute
+                   pkgs.pkgsStatic.stdenv.hostPlatform)
+            then drv
+            else drv.overrideAttrs (o: {
+              preConfigure = (o.preConfigure or "") + ''
+                export CC_FOR_BUILD=$CC
+              '';
+            });
           pd = pkgs.pkgsStatic.extend (final: prev:
             (chafaOverlay final prev)
             // (imagemagickOverlay final prev)
