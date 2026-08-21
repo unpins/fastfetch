@@ -716,6 +716,19 @@
             # is unaffected.
             "efl"
           ];
+          # nixpkgs points CUSTOM_{PCI,AMDGPU}_IDS_PATH at hwdata/libdrm in the
+          # store, and upstream feeds those to FF_STR() (CMakeLists passes them
+          # to target_compile_definitions unquoted). Stringification expands
+          # macros first, so the GNU predefined `linux` == 1 rewrites the path
+          # to ".../hwdata-static-x86_64-unknown-1-musl-0.406/..." — a dead
+          # path that nothing can open, and the only thing keeping a store
+          # reference to hwdata alive in a binary meant to run off-store.
+          # ENABLE_EMBEDDED_*IDS below carries both tables inside the binary,
+          # so the file is a miss-path fallback anyway; without the flag it
+          # falls back to upstream's /usr/share/hwdata/pci.ids, a real host
+          # file. Dropped rather than quoted for that reason.
+          dropCustomIdsPaths = builtins.filter
+            (f: builtins.match "-DCUSTOM_(PCI|AMDGPU)_IDS_PATH.*" (toString f) == null);
           # dconfStatic: dconf's GSettings backend + engine + gvdb, built as
           # static archives against OUR pkgsStatic glib. nixpkgs marks
           # pkgsStatic.dconf badPlatforms.isStatic because its meson hardcodes
@@ -1118,7 +1131,7 @@
           # libffi: dep transitive de libwayland (protocol marshalling).
           # Trampoline continua pra libvulkan/libOpenCL/libdbus/libchafa/etc.
           NIX_LDFLAGS = "-L${tlsTrampoline}/lib -l:foreign_dlopen.a -l:libwayland-client.a -lffi --wrap=dlopen --wrap=dlsym --wrap=dlclose --wrap=dlerror";
-          cmakeFlags = (old.cmakeFlags or [ ]) ++ [
+          cmakeFlags = (dropCustomIdsPaths (old.cmakeFlags or [ ])) ++ [
             "-DENABLE_EMBEDDED_PCIIDS=On"
             "-DENABLE_EMBEDDED_AMDGPUIDS=On"
             # Round 8: ICD-loader status pending validation. Round 7 verified
@@ -1237,7 +1250,7 @@
             # in the sysroot either. dconf/gtk -L/-l still ride NIX_LDFLAGS fine.
             export NIX_LDFLAGS="$NIX_LDFLAGS -L${dconfStatic}/lib -l:libdconfsettings.a -l:libdconf-engine.a -l:libdconf-gdbus-thread.a -l:libdconf-common.a -l:libgvdb.a -l:libdconf-shm.a $gtkLibs"
           '';
-          cmakeFlags = (old.cmakeFlags or [ ]) ++ [
+          cmakeFlags = (dropCustomIdsPaths (old.cmakeFlags or [ ])) ++ [
             # link our static .a deps into the binary instead of dlopen'ing
             "-DBINARY_LINK_TYPE=static"
             "-DENABLE_EMBEDDED_PCIIDS=On"
