@@ -69,6 +69,18 @@
       # and NULL-guarded, so the features degrade gracefully if a macOS update
       # ever removes the framework.
       darwinAllowPrivateFrameworks = [ "DisplayServices" "MediaRemote" ];
+
+      # The static binary keeps the datadir/helper path constants its libraries
+      # bake in — glib's localedir, libX11's compose tables, dbus-launch, the
+      # XML catalog, the RUNPATHs of the two embedded foreign-dlopen helpers —
+      # and Nix reads them as runtime references. None is reachable: the code
+      # is linked in and the helpers are extracted and run from a temporary
+      # directory. Left alone they dragged a 1.02 GB closure behind a 15 MB
+      # binary, most of it ImageMagick's and glib's build inputs.
+      removeReferences = [
+        "libdrm" "libx11" "glib-static" "dbus-static" "imagemagick"
+        "libxml2" "glibc" "gcc-15" "graphicsgd" "fastfetch-static"
+      ];
       build = pkgs:
         let
           # Native build (incl. CI's aarch64 arm runner): build==host, so
