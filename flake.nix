@@ -693,17 +693,6 @@
           libjpegturboOverlay = final: prev: {
             libjpeg = prev.libjpeg.overrideAttrs (_: { doInstallCheck = false; });
           };
-          # libx11 has an XORG_PROG_RAWCPP configure probe that feeds the raw
-          # C preprocessor no input; the engine cc-wrapper's `cpp` errors out
-          # ("no input files") and libx11 aborts ("defines unix with or without
-          # -undef"). Point RAWCPP at the plain build-host cpp (honors -undef);
-          # libx11 still links in as a static .a. Same fix sox uses. Linux-only
-          # (darwin's closure doesn't pull libx11).
-          libx11Overlay = final: prev: {
-            libx11 = prev.libx11.overrideAttrs (_: {
-              RAWCPP = "${final.buildPackages.stdenv.cc}/bin/cpp";
-            });
-          };
           p = pkgs.pkgsStatic.extend (final: prev:
             (ddcutilOverlay final prev)
             // (chafaOverlay final prev)
@@ -713,7 +702,6 @@
             // (potraceOverlay final prev)
             // (libultrahdrOverlay final prev)
             // (libjpegturboOverlay final prev)
-            // (libx11Overlay final prev)
           );
           dropDeps = [
             "libpulseaudio" "dconf"
@@ -762,8 +750,8 @@
           # exported helper we append (G_DEFINE_TYPE's get_type is hidden, and
           # the stock g_io_module_load derefs a GTypeModule → crashes on NULL).
           # Built from `p` (not raw pkgsStatic) so dconf's dbus -> libx11 dep
-          # inherits the libx11 RAWCPP overlay; otherwise a second, un-overridden
-          # libx11 leaks into the closure and fails the XORG_PROG_RAWCPP probe.
+          # shares the one libx11 this flake's overlays produce, instead of
+          # leaking a second, differently-overridden copy into the closure.
           dconfStatic = p.dconf.overrideAttrs (o: {
             pname = "dconf-static-libs";
             outputs = [ "out" ];
