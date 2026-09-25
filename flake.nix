@@ -23,16 +23,14 @@
     flake = false;
   };
 
-  # The fdlhelper has to be glibc-dynamically-linked against a glibc whose
-  # symbols are a superset of what host libraries need at runtime. The
-  # unpins-lib pin (~Sep 2025, glibc 2.40-224) is older than what most
-  # current Linux distros / NixOS configurations ship; libvulkan on host
-  # boxes is generally built against glibc 2.42+, and dlopen'ing it from
-  # a 2.40 helper fails on symbol-version lookup. We source the helper
-  # from nixos-unstable for a recent glibc — and then polyfill-glibc the
-  # resulting binary back down to a 2.17 floor (covers CentOS 7+ vintage),
-  # so the helper runs on any modern-enough distro.
-  inputs.nixpkgs-recent.url = "github:NixOS/nixpkgs/nixos-unstable";
+  # The fdlhelper is the one piece here that is glibc-dynamic, and its glibc
+  # must be at least as new as the host libraries it dlopen's — libvulkan on
+  # current distros wants 2.42+, and a helper built against an older one fails
+  # the symbol-version lookup. This used to need a second, newer nixpkgs; the
+  # catalog pin now ships glibc-2.42-84 against nixos-unstable's 2.42-61, so the
+  # extra input was buying an OLDER libc. Follow unpins-lib and keep one nixpkgs.
+  # The 2.17 floor still comes from polyfill-glibc below, not from the pin.
+  inputs.nixpkgs.follows = "unpins-lib/nixpkgs";
 
   # polyfill-glibc (corsix): rewrites .gnu.version_r so the helper can run
   # against older glibc than it was built with. Same tool upstream fastfetch
@@ -43,7 +41,7 @@
     flake = false;
   };
 
-  outputs = { self, unpins-lib, graphicsgd-src, nixpkgs-recent, polyfill-glibc-src }:
+  outputs = { self, unpins-lib, graphicsgd-src, nixpkgs, polyfill-glibc-src }:
     unpins-lib.lib.mkStandaloneFlake {
       inherit self;
       name = "fastfetch";
@@ -54,7 +52,7 @@
       # swapped pkgs whose `pkgsStatic` IS the bitcode set, so the `p`/`pd`/
       # `dconfStatic`/`tlsTrampoline` derivations fold under the engine
       # automatically. The glibc/musl foreign-dlopen helpers stay off-engine
-      # (they use recentPkgs.stdenv / pkgsCross.musl64, not pkgsStatic) — they
+      # (they use helperPkgs.stdenv / pkgsCross.musl64, not pkgsStatic) — they
       # must remain real dynamic ELFs run as separate processes at runtime.
       engine = "unpin-llvm";
       smoke = [ "--version" ];
@@ -84,15 +82,15 @@
       build = pkgs:
         let
           # Native build (incl. CI's aarch64 arm runner): build==host, so
-          # legacyPackages.<system> — byte-identical to the original. When
-          # cross-compiling (e.g. the local build-aarch64-linux helper on an
-          # x86_64 box), instantiate recentPkgs as a *cross* set so its
-          # buildPackages tools (polyfill-glibc, ninja) run on the build host
-          # while glibcHelper's fdlhelper still targets the host arch.
-          recentPkgs =
+          # legacyPackages.<system>. When cross-compiling (e.g. the local
+          # build-aarch64-linux helper on an x86_64 box), instantiate it as a
+          # *cross* set so its buildPackages tools (polyfill-glibc, ninja) run on
+          # the build host while glibcHelper's fdlhelper still targets the host
+          # arch. Plain nixpkgs, not the engine set: these stay real dynamic ELFs.
+          helperPkgs =
             if pkgs.stdenv.buildPlatform.system == pkgs.stdenv.hostPlatform.system
-            then nixpkgs-recent.legacyPackages.${pkgs.stdenv.hostPlatform.system}
-            else import nixpkgs-recent {
+            then nixpkgs.legacyPackages.${pkgs.stdenv.hostPlatform.system}
+            else import nixpkgs {
               localSystem = pkgs.stdenv.buildPlatform.system;
               crossSystem = pkgs.stdenv.hostPlatform.system;
             };
@@ -300,15 +298,15 @@
           # build from upstream sources.
           # Build-time tool: it rewrites a target binary's ELF version
           # records (arch-agnostic), so it must run on the *build host*, not
-          # the target. Using recentPkgs.stdenv would build it for the target
+          # the target. Using helperPkgs.stdenv would build it for the target
           # arch — fine natively (build==host) but unbuildable when cross-
           # compiling (e.g. aarch64-linux from x86_64) without an arm builder.
           # buildPackages.stdenv pins it to the build host; identical natively.
-          polyfillGlibc = recentPkgs.buildPackages.stdenv.mkDerivation {
+          polyfillGlibc = helperPkgs.buildPackages.stdenv.mkDerivation {
             pname = "polyfill-glibc";
             version = "dd59051";
             src = polyfill-glibc-src;
-            nativeBuildInputs = [ recentPkgs.buildPackages.ninja ];
+            nativeBuildInputs = [ helperPkgs.buildPackages.ninja ];
             buildPhase = ''
               runHook preBuild
               ninja polyfill-glibc
@@ -343,15 +341,15 @@
               throw "unsupported arch for fdlhelper musl ld.so path";
 
           # glibcHelper: glibc-dynamic ELF embedded for the glibc-host path
-          # (Debian/Ubuntu/RHEL/Arch/Fedora/etc). Built against recentPkgs
+          # (Debian/Ubuntu/RHEL/Arch/Fedora/etc). Built against helperPkgs
           # glibc 2.42+, then polyfilled down to a 2.17 floor (CentOS 7
           # vintage). See [[feedback_polyfill_glibc_fixup_trap]] for why
           # dontPatchELF/dontStrip are required.
-          glibcHelper = recentPkgs.stdenv.mkDerivation {
+          glibcHelper = helperPkgs.stdenv.mkDerivation {
             pname = "graphicsgd-glibc-helper";
             version = "07c79b4";
             dontUnpack = true;
-            nativeBuildInputs = [ polyfillGlibc recentPkgs.patchelf ];
+            nativeBuildInputs = [ polyfillGlibc helperPkgs.patchelf ];
             dontPatchELF = true;
             dontStrip = true;
             buildPhase = ''
