@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [2.63.1-2] - 2026-09-26
+
 ### Fixed
 
 - `nix build` downloaded roughly a gigabyte of build-only dependencies to
