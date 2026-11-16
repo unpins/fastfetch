@@ -292,48 +292,37 @@
           };
 
           # muslHelper: musl-dynamic ELF embedded for the musl-host path
-          # (Alpine, Chimera, Void-musl, etc). Built via pkgsCross.musl64
-          # (x86_64 only for now — aarch64 musl cross is a different attr
-          # and the Alpine arm64 user base is smaller). No polyfill needed
-          # — musl pledges ABI stability across releases, so a 1.2.x helper
-          # runs on any Alpine 3.16+ vintage.
-          muslHelper =
-            if pkgs.stdenv.hostPlatform.isx86_64 then
-              pkgs.pkgsCross.musl64.stdenv.mkDerivation {
-                pname = "graphicsgd-musl-helper";
-                version = "07c79b4";
-                dontUnpack = true;
-                nativeBuildInputs = [ pkgs.pkgsCross.musl64.buildPackages.patchelf ];
-                dontPatchELF = true;
-                dontStrip = true;
-                buildPhase = ''
-                  cp ${helperSrc} helper.c
-                  $CC -pie -fPIC -O2 -o fdlhelper helper.c -lpthread -ldl
-                  patchelf --set-interpreter ${systemLdSoMusl} --remove-rpath fdlhelper
-                '';
-                installPhase = ''
-                  mkdir -p $out/bin
-                  cp fdlhelper $out/bin/fdlhelper
-                '';
-                doInstallCheck = true;
-                installCheckPhase = ''
-                  file $out/bin/fdlhelper | grep -q 'dynamically linked' \
-                    || { echo "muslHelper NOT dynamic"; exit 1; }
-                  actual=$(patchelf --print-interpreter $out/bin/fdlhelper)
-                  [ "$actual" = "${systemLdSoMusl}" ] \
-                    || { echo "musl interp not patched: $actual"; exit 1; }
-                '';
-              }
-            else
-              # aarch64 musl cross-build path not yet wired. Embed a 1-byte
-              # placeholder so xxd-i emits a valid C symbol; foreign_compile
-              # never references it because the aarch64 detection branch
-              # only checks the glibc ld.so path (pick_helper() in
-              # patches/graphicsgd-dlopen-embedded-helper.patch).
-              pkgs.runCommand "musl-helper-placeholder" { } ''
-                mkdir -p $out/bin
-                printf '\0' > $out/bin/fdlhelper
-              '';
+          # (Alpine, Chimera, Void-musl, etc). No polyfill needed — musl pledges
+          # ABI stability across releases, so a 1.2.x helper runs on any Alpine
+          # 3.16+ vintage.
+          muslCross =
+            if pkgs.stdenv.hostPlatform.isx86_64 then pkgs.pkgsCross.musl64
+            else pkgs.pkgsCross.aarch64-multiplatform-musl;
+          muslHelper = muslCross.stdenv.mkDerivation {
+            pname = "graphicsgd-musl-helper";
+            version = "07c79b4";
+            dontUnpack = true;
+            nativeBuildInputs = [ muslCross.buildPackages.patchelf ];
+            dontPatchELF = true;
+            dontStrip = true;
+            buildPhase = ''
+              cp ${helperSrc} helper.c
+              $CC -pie -fPIC -O2 -o fdlhelper helper.c -lpthread -ldl
+              patchelf --set-interpreter ${systemLdSoMusl} --remove-rpath fdlhelper
+            '';
+            installPhase = ''
+              mkdir -p $out/bin
+              cp fdlhelper $out/bin/fdlhelper
+            '';
+            doInstallCheck = true;
+            installCheckPhase = ''
+              file $out/bin/fdlhelper | grep -q 'dynamically linked' \
+                || { echo "muslHelper NOT dynamic"; exit 1; }
+              actual=$(patchelf --print-interpreter $out/bin/fdlhelper)
+              [ "$actual" = "${systemLdSoMusl}" ] \
+                || { echo "musl interp not patched: $actual"; exit 1; }
+            '';
+          };
 
           # tlsTrampoline: static archive built from graphics.gd's dlopen.c
           # + foreign_tramp.S + the xxd-i'd fdlhelper bytes (see the patch

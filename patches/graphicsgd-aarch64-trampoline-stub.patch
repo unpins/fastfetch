@@ -67,7 +67,7 @@ SIGSEGV inside foreign_tramp. On x86_64 the flush compiles to nothing.
  
    return stub;
  #else
-@@ -966,6 +967,7 @@
+@@ -967,6 +968,7 @@
    WRITE32LE(stub + i, 0xd503201f); i += 4;
    /* literal: call_procaddr_and_wrap address */
    WRITE64LE(stub + i, (uintptr_t)call_procaddr_and_wrap);

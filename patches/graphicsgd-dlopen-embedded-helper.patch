@@ -104,7 +104,7 @@ fastfetch's calls reach them through ld --wrap.
  
  struct Loaded {
    char *base;
-@@ -754,49 +666,77 @@
+@@ -754,49 +666,78 @@
  #endif
  }
  
@@ -137,8 +137,9 @@ fastfetch's calls reach them through ld --wrap.
 +  if (access("/lib/ld-linux-aarch64.so.1", F_OK) == 0) {
 +    *data = glibc_helper_data; *len = glibc_helper_data_len; return 1;
 +  }
-+  /* aarch64 musl helper not built yet — ld-musl-aarch64.so.1
-+     detection would route to a 1-byte placeholder, so skip it. */
++  if (access("/lib/ld-musl-aarch64.so.1", F_OK) == 0) {
++    *data = musl_helper_data; *len = musl_helper_data_len; return 1;
++  }
 +#endif
 +  return 0;
 +}
@@ -209,7 +210,7 @@ fastfetch's calls reach them through ld --wrap.
  static void foreign_setup(void) {
    char exe[PATH_MAX];
    if (!foreign_compile(exe)) {
-@@ -851,7 +791,7 @@
+@@ -851,7 +792,7 @@
   * TLS context rather than corrupting it by switching to native.
   */
  __attribute__((noinline))
@@ -218,7 +219,7 @@ fastfetch's calls reach them through ld --wrap.
    if (!foreign_init()) return NULL;
    void *saved_tls = get_current_tls();
    set_current_tls(get_thread_foreign_tls());
-@@ -1034,7 +974,7 @@
+@@ -1034,7 +975,7 @@
  }
  
  __attribute__((noinline))
@@ -227,7 +228,7 @@ fastfetch's calls reach them through ld --wrap.
    if (!foreign_init()) return NULL;
    void *saved_tls = get_current_tls();
    set_current_tls(get_thread_foreign_tls());
-@@ -1063,7 +1003,7 @@
+@@ -1063,7 +1004,7 @@
    return foreign_wrap(real_func);
  }
  
@@ -236,7 +237,7 @@ fastfetch's calls reach them through ld --wrap.
    if (!foreign_init()) return -1;
    void *saved_tls = get_current_tls();
    set_current_tls(get_thread_foreign_tls());
-@@ -1072,7 +1012,7 @@
+@@ -1072,7 +1013,7 @@
    return result;
  }
  

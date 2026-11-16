@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- On musl-based Linux aarch64 systems such as Alpine, fastfetch can now load
+  the system's GPU libraries, as it already did on x86_64 and on glibc-based
+  aarch64, so the Vulkan module reports the installed driver instead of
+  nothing.
+
 ### Fixed
 
 - On Linux aarch64, the Vulkan module (`fastfetch -s Vulkan`) crashed the
