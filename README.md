@@ -47,15 +47,23 @@ The [Releases](https://github.com/unpins/fastfetch/releases) page has standalone
 
 ## Build notes
 
-fastfetch probes the system through many libraries that upstream `dlopen`s at
-runtime. This build links them **statically** instead — the only thing left
-dynamic is the machine-specific GPU driver (Vulkan/OpenCL loaders, NVIDIA/Moore-Threads
-management libs); GPU name/vendor still resolves without a driver via sysfs and an
-embedded `pci.ids`.
+fastfetch normally loads many of its libraries from the system at runtime.
+This build puts them inside the binary instead. What still comes from the
+system is what has to match the machine: the GPU drivers (Vulkan, OpenCL,
+OpenGL), the PulseAudio client library for the Sound module, and the NVIDIA
+and Moore Threads management libraries. Without a driver, the GPU name and
+vendor still show up, read from sysfs and an embedded PCI ID list.
 
-- **Linux** ships for six arches (x86_64, aarch64, i686, ppc64le, riscv64, armv7l). GPU
-  compute/render API detail needs a TLS-swap trampoline that only exists for x86_64/aarch64,
-  so it's the one feature missing on the other four.
-- **macOS** uses Apple frameworks. Two features (display brightness, now-playing Media) rely
-  on *private* frameworks, weak-linked as a per-package exception and null-guarded so they
-  degrade to "unavailable" rather than break on a future macOS.
+What is missing, and where:
+
+- **Linux i686, ppc64le, riscv64 and armv7l:** no Vulkan, OpenCL, OpenGL or
+  Sound details, because loading the system's libraries only works on x86_64
+  and aarch64. Everything else matches the x86_64 and aarch64 builds.
+- **macOS:** no Vulkan module. MoltenVK, the only Vulkan driver on macOS, can't
+  be built into the binary; the GPU itself is still detected. Display
+  brightness and the now-playing Media module use private Apple frameworks; if
+  a future macOS removes them, those modules report "unavailable" instead of
+  failing.
+- **Image logos:** PNG, JPEG, WebP, TIFF, HEIC, JPEG XL and SVG work. Camera
+  RAW, OpenEXR, DjVu and JPEG 2000 images don't.
+- **Windows:** no build yet.

@@ -4,6 +4,8 @@
 
 ### Added
 
+- On Linux x86_64 and aarch64, the OpenGL and Sound modules now work: they
+  report the OpenGL version and the PulseAudio (or PipeWire) audio devices.
 - On musl-based Linux aarch64 systems such as Alpine, fastfetch can now load
   the system's GPU libraries, as it already did on x86_64 and on glibc-based
   aarch64, so the Vulkan module reports the installed driver instead of
@@ -11,6 +13,10 @@
 
 ### Fixed
 
+- On Linux, image logos in WebP, TIFF, HEIC and JPEG XL failed to render; they
+  now display like PNG and JPEG.
+- On macOS, the image logo only worked on Macs with Homebrew's ImageMagick
+  installed. Image logos no longer need anything installed.
 - On Linux aarch64, the Vulkan module (`fastfetch -s Vulkan`) crashed the
   program with a segmentation fault or an illegal instruction whenever a
   Vulkan driver was installed. The machine code fastfetch generates at
