@@ -830,9 +830,14 @@
               # (overlay no pkgsStatic disparou rebuild de stdenv musl); fica
               # como work pra nix-lib futuro.
               p.wayland.dev
+              # Headers and .pc only (OpenGL, Sound): both libraries are
+              # dlopen'ed from the host through the trampoline, never linked.
+              pkgs.libglvnd.dev
+              pkgs.libpulseaudio.dev
             ];
           patches = (old.patches or [ ]) ++ [
             ./patches/linux-static-link-per-tu.patch
+            ./patches/pulse-callbacks-native-tls.patch
             ./patches/register-dconf-backend.patch
           ];
           preConfigure = (old.preConfigure or "") + ''
@@ -892,15 +897,15 @@
             # sees a "real" glibc TLS at call time. Smoke target.
             "-DENABLE_VULKAN=On"
             "-DENABLE_OPENCL=On"
-            "-DENABLE_EGL=Off"
-            "-DENABLE_GLX=Off"
+            "-DENABLE_EGL=On"
+            "-DENABLE_GLX=On"
             "-DENABLE_XCB_RANDR=On"
             "-DENABLE_XRANDR=On"
             "-DENABLE_WAYLAND=On"
             "-DENABLE_DRM=On"
             "-DENABLE_DRM_AMDGPU=On"
             "-DENABLE_DBUS=On"
-            "-DENABLE_PULSE=Off"
+            "-DENABLE_PULSE=On"
             "-DENABLE_DCONF=Off"
             "-DENABLE_GIO=On"
             "-DENABLE_DDCUTIL=On"

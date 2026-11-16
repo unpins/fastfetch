@@ -1,0 +1,50 @@
+libpulse calls these callbacks from pa_mainloop_iterate(), inside the
+host library that the foreign-dlopen trampoline runs with glibc's TLS.
+Their bodies call back into musl (malloc through FFstrbuf), so each one
+switches to the native TLS for its body (dlopen_callback_enter/exit, from
+graphics.gd's dlopen.c).
+
+--- a/src/detection/sound/sound_linux.c
++++ b/src/detection/sound/sound_linux.c
+@@ -11,7 +11,12 @@
+     FFSoundOptions* options;
+ };
+ 
+-static void paSinkInfoCallback(FF_A_UNUSED pa_context* c, const pa_sink_info* i, int eol, void* userdata) {
++// libpulse runs these callbacks from pa_mainloop_iterate(), with the
++// host's glibc TLS active; switch back to ours for the body.
++void* dlopen_callback_enter(void);
++void dlopen_callback_exit(void* saved);
++
++static void paSinkInfoCallbackBody(const pa_sink_info* i, int eol, void* userdata) {
+     if (eol > 0 || !i) {
+         return;
+     }
+@@ -39,7 +44,13 @@
+     device->type = (isMain ? FF_SOUND_TYPE_MAIN : FF_SOUND_TYPE_NONE) | (isActive ? FF_SOUND_TYPE_ACTIVE : FF_SOUND_TYPE_NONE);
+ }
+ 
+-static void paServerInfoCallback(FF_A_UNUSED pa_context* c, const pa_server_info* i, void* userdata) {
++static void paSinkInfoCallback(FF_A_UNUSED pa_context* c, const pa_sink_info* i, int eol, void* userdata) {
++    void* saved = dlopen_callback_enter();
++    paSinkInfoCallbackBody(i, eol, userdata);
++    dlopen_callback_exit(saved);
++}
++
++static void paServerInfoCallbackBody(const pa_server_info* i, void* userdata) {
+     if (!i) {
+         return;
+     }
+@@ -57,6 +68,12 @@
+     ffStrbufSetS(&bundle->defaultDeviceId, i->default_sink_name);
+ }
+ 
++static void paServerInfoCallback(FF_A_UNUSED pa_context* c, const pa_server_info* i, void* userdata) {
++    void* saved = dlopen_callback_enter();
++    paServerInfoCallbackBody(i, userdata);
++    dlopen_callback_exit(saved);
++}
++
+ static const char* detectSound(FFSoundOptions* options, FFlist* devices) {
+     FF_LIBRARY_LOAD_MESSAGE(pulse, "libpulse" FF_LIBRARY_EXTENSION, 0)
+     FF_LIBRARY_LOAD_SYMBOL_MESSAGE(pulse, pa_mainloop_new)
