@@ -748,11 +748,33 @@
           propagatedBuildInputs = builtins.filter
             (x: (x.pname or x.name or "") != "MoltenVK")
             (old.propagatedBuildInputs or [ ]);
+          # Link chafa, ImageMagick, sqlite3 and zlib from their static
+          # archives. Upstream's default BINARY_LINK_TYPE=dlopen loads them
+          # from the host at runtime (with an LC_RPATH to Homebrew's lib dirs),
+          # so a Mac without Homebrew had no image logo. `dynamic` links what
+          # CMake found and defines FF_DISABLE_DLOPEN; with only .a files in
+          # this set the result is static. (`static` would add -static, which
+          # macOS doesn't link.) zlib is added so pkg-config finds a static
+          # one instead of the SDK's libz.tbd. pkg-config's Libs.private
+          # supply the archives' own deps; -framework entries ride along.
+          patches = (old.patches or [ ]) ++ [ ./patches/no-copy-dt-needed-entries.patch ];
+          buildInputs = (old.buildInputs or [ ]) ++ [ pd.zlib ];
+          preConfigure = (old.preConfigure or "") + ''
+            pcs="chafa zlib MagickCore sqlite3"
+            libs="$($PKG_CONFIG --static --libs-only-L $pcs) $($PKG_CONFIG --static --libs-only-l $pcs)"
+            fws="$($PKG_CONFIG --static --libs-only-other $pcs | grep -oE 'framework[ ,][A-Za-z0-9_]+' | sed -E 's/^framework[ ,]/-framework /' | sort -u | tr '\n' ' ')"
+            export NIX_LDFLAGS="$NIX_LDFLAGS $libs $fws"
+          '';
           cmakeFlags = (old.cmakeFlags or [ ]) ++ [
+            "-DBINARY_LINK_TYPE=dynamic"
             "-DENABLE_VULKAN=Off"
             "-DENABLE_IMAGEMAGICK7=On"
             "-DENABLE_IMAGEMAGICK6=Off"
             "-DENABLE_CHAFA=On"
+            # Bare -lc++ for MagickCore.a's C++ deps (libultrahdr): it makes
+            # the engine driver link its static libc++ (see the Linux branch
+            # for why it can't ride NIX_LDFLAGS).
+            "-DCMAKE_EXE_LINKER_FLAGS=-lc++"
           ];
         }))
         else if useDlopen

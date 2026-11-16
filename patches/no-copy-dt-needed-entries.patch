@@ -1,6 +1,6 @@
-BINARY_LINK_TYPE=static adds GNU ld's -Wl,--copy-dt-needed-entries,
-which lld rejects. It only affects indirect DT_NEEDED of shared
-libraries, and this link has none.
+Any BINARY_LINK_TYPE but dlopen adds GNU ld's -Wl,--copy-dt-needed-entries,
+which lld (ELF and Mach-O) rejects. It only affects indirect DT_NEEDED of
+shared libraries, and these links have none.
 
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
