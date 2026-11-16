@@ -532,16 +532,6 @@
               cmakeFlags = (old.cmakeFlags or [ ]) ++ [ "-DUHDR_ENABLE_INTRINSICS=0" ];
             });
           };
-          # libjpeg-turbo (pulled via imagemagick's JPEG reader) runs `make test`
-          # as its installCheck (doInstallCheck, NOT doCheck), and its
-          # bmpsizetest is a huge-allocation integer-overflow probe the loaded
-          # builder OOM-kills ("Subprocess killed"); the 331 SIMD-correctness
-          # tests pass, so libjpeg.a is sound — the killed test is a build-time
-          # self-test, not a functional gate (same rationale as libultrahdr
-          # above). fastfetch decodes JPEG, never BMP.
-          libjpegturboOverlay = final: prev: {
-            libjpeg = prev.libjpeg.overrideAttrs (_: { doInstallCheck = false; });
-          };
           p = pkgs.pkgsStatic.extend (final: prev:
             (ddcutilOverlay final prev)
             // (chafaOverlay final prev)
@@ -550,7 +540,6 @@
             // (oclIcdOverlay final prev)
             // (potraceOverlay final prev)
             // (libultrahdrOverlay final prev)
-            // (libjpegturboOverlay final prev)
           );
           dropDeps = [
             "libpulseaudio" "dconf"
@@ -647,12 +636,6 @@
             (chafaOverlay final prev)
             // (imagemagickOverlay final prev)
             // (potraceOverlay final prev)
-            # imagemagick's JPEG reader pulls libjpeg-turbo on darwin too; its
-            # installCheck (bmpsizetest) is the same OOM-prone build-time self-
-            # test disabled on linux. isRiscV is false here, so this reduces to
-            # doInstallCheck=false — libjpeg-turbo is not a stdenv requisite, so
-            # unlike sqlite/gmp it doesn't fork the bootstrap.
-            // (libjpegturboOverlay final prev)
             # darwin meson-subsystem fixes (nixos-26.05): glib 2.88.1
             # meson.build:84 does `host_machine.subsystem()`, which aborts
             # ("Subsystem not defined") whenever meson runs in cross mode.
