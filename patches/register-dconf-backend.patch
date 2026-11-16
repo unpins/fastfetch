@@ -1,0 +1,14 @@
+fastfetch embeds dconf's GSettings backend statically (dconfStatic). A
+static backend is not found by GIO's module scan, so register it at the
+start of main(), before any GSettings use caches the default backend.
+
+--- a/src/fastfetch.c
++++ b/src/fastfetch.c
+@@ -827,6 +827,7 @@
+ 
+ int main(int argc, char** argv) {
+     ffInitInstance();
++    { extern void dconf_register_static_gsettings_backend(void); dconf_register_static_gsettings_backend(); }
+     atexit(ffDestroyInstance);
+ 
+     // Data stores things only needed for the configuration of fastfetch

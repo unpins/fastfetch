@@ -1,0 +1,128 @@
+Link the self-contained optional libraries into the binary instead of
+dlopen'ing them from the host: FF_DISABLE_DLOPEN per translation unit,
+so only that file's references become direct (fastfetch's library.h
+switches on it). Only the host GPU driver/ICD libraries (Vulkan, OpenCL,
+EGL, GLX, NVML, MTML) stay dlopen'ed, through the trampoline.
+
+  wayland.c          libwayland-client (crashed when loaded through the
+                     trampoline in a Wayland session)
+  image.c, im7.c     chafa, zlib, MagickCore (logo)
+  lm_linux.c,
+  networking_common.c  zlib
+  dbus.c             dbus-1
+  brightness_linux.c ddcutil
+  drm.c, gpu_drm.c   libdrm, libdrm_amdgpu
+  xcb.c, xlib.c      xcb-randr, Xrandr
+  binary_linux.c     libelf
+  settings.c         glib/gio (GSettings, with the embedded dconf backend)
+                     and sqlite3
+  de_linux.c         libxfce4util: upstream stubs its static path out
+                     ("dlopen is disabled"); call xfce_version_string()
+
+--- a/src/common/impl/binary_linux.c
++++ b/src/common/impl/binary_linux.c
+@@ -1,3 +1,4 @@
++#define FF_DISABLE_DLOPEN 1
+ #include "common/binary.h"
+ 
+ #if defined(FF_HAVE_ELF) || defined(__sun) || (defined(__FreeBSD__) && !defined(__DragonFly__)) || defined(__OpenBSD__) || defined(__NetBSD__)
+--- a/src/common/impl/dbus.c
++++ b/src/common/impl/dbus.c
+@@ -1,3 +1,4 @@
++#define FF_DISABLE_DLOPEN 1
+ #include "common/dbus.h"
+ 
+ #ifdef FF_HAVE_DBUS
+--- a/src/common/impl/networking_common.c
++++ b/src/common/impl/networking_common.c
+@@ -1,3 +1,4 @@
++#define FF_DISABLE_DLOPEN 1
+ #include "fastfetch.h"
+ #include "common/library.h"
+ #include "common/networking.h"
+--- a/src/common/impl/settings.c
++++ b/src/common/impl/settings.c
+@@ -1,3 +1,4 @@
++#define FF_DISABLE_DLOPEN 1
+ #include "fastfetch.h"
+ #include "common/settings.h"
+ #include "common/library.h"
+--- a/src/detection/brightness/brightness_linux.c
++++ b/src/detection/brightness/brightness_linux.c
+@@ -1,3 +1,4 @@
++#define FF_DISABLE_DLOPEN 1
+ #include "brightness.h"
+ #include "common/io.h"
+ #include "common/edidHelper.h"
+--- a/src/detection/de/de_linux.c
++++ b/src/detection/de/de_linux.c
+@@ -1,3 +1,4 @@
++#define FF_DISABLE_DLOPEN 1
+ #include "de.h"
+ 
+ #include "common/dbus.h"
+@@ -120,7 +121,7 @@
+     return NULL;
+ #else
+     FF_UNUSED(result);
+-    return "dlopen is disabled";
++    { const char* xfce_version_string(void); ffStrbufSetS(result, xfce_version_string()); return NULL; }
+ #endif
+ }
+ 
+--- a/src/detection/displayserver/linux/drm.c
++++ b/src/detection/displayserver/linux/drm.c
+@@ -1,3 +1,4 @@
++#define FF_DISABLE_DLOPEN 1
+ #include "displayserver_linux.h"
+ #include "common/io.h"
+ #include "common/edidHelper.h"
+--- a/src/detection/displayserver/linux/wayland/wayland.c
++++ b/src/detection/displayserver/linux/wayland/wayland.c
+@@ -1,3 +1,4 @@
++#define FF_DISABLE_DLOPEN 1
+ #include "../displayserver_linux.h"
+ #include "common/io.h"
+ #include "common/edidHelper.h"
+--- a/src/detection/displayserver/linux/xcb.c
++++ b/src/detection/displayserver/linux/xcb.c
+@@ -1,3 +1,4 @@
++#define FF_DISABLE_DLOPEN 1
+ #include "displayserver_linux.h"
+ 
+ #ifdef FF_HAVE_XCB_RANDR
+--- a/src/detection/displayserver/linux/xlib.c
++++ b/src/detection/displayserver/linux/xlib.c
+@@ -1,3 +1,4 @@
++#define FF_DISABLE_DLOPEN 1
+ #include "displayserver_linux.h"
+ 
+ #ifdef FF_HAVE_XRANDR
+--- a/src/detection/gpu/gpu_drm.c
++++ b/src/detection/gpu/gpu_drm.c
+@@ -1,3 +1,4 @@
++#define FF_DISABLE_DLOPEN 1
+ #include "gpu.h"
+ 
+ #if FF_HAVE_DRM
+--- a/src/detection/lm/lm_linux.c
++++ b/src/detection/lm/lm_linux.c
+@@ -1,3 +1,4 @@
++#define FF_DISABLE_DLOPEN 1
+ #include "lm.h"
+ #include "common/properties.h"
+ #include "common/dbus.h"
+--- a/src/logo/image/im7.c
++++ b/src/logo/image/im7.c
+@@ -1,3 +1,4 @@
++#define FF_DISABLE_DLOPEN 1
+ #ifdef FF_HAVE_IMAGEMAGICK7
+ 
+     #include "image.h"
+--- a/src/logo/image/image.c
++++ b/src/logo/image/image.c
+@@ -1,3 +1,4 @@
++#define FF_DISABLE_DLOPEN 1
+ #include "image.h"
+ #include "common/io.h"
+ #include "common/printing.h"

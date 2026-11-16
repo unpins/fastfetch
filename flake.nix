@@ -826,30 +826,20 @@
               # como work pra nix-lib futuro.
               p.wayland.dev
             ];
+          patches = (old.patches or [ ]) ++ [
+            ./patches/linux-static-link-per-tu.patch
+            ./patches/register-dconf-backend.patch
+          ];
           preConfigure = (old.preConfigure or "") + ''
             mkdir -p build
             cp ${p.hwdata}/share/hwdata/pci.ids build/pci.ids
             cp ${p.libdrm}/share/libdrm/amdgpu.ids build/amdgpu.ids
             chmod +w build/pci.ids build/amdgpu.ids
-            # Round 9: força wayland.c em static-mode via FF_DISABLE_DLOPEN
-            # (vê library.h branch #else). Outros TUs continuam em dlopen-mode
-            # (struct shape idêntica). Linker pulls libwayland-client.a via
-            # NIX_LDFLAGS -l:libwayland-client.a abaixo.
-            sed -i '1i #define FF_DISABLE_DLOPEN 1' \
-              src/detection/displayserver/linux/wayland/wayland.c
-
-            # Round 10: make the binary truly self-contained — static-link the
-            # self-contained optional libs (FF_DISABLE_DLOPEN per-TU) instead
-            # of dlopen'ing them from the host. Only the host GPU driver/ICD
-            # libs (vulkan/opencl/egl/glx/nvidia-ml/mtml) stay dlopen via the
-            # trampoline below — those are machine-specific, can't be bundled.
-            # Logo: image.c loads BOTH chafa and zlib; im7.c loads MagickCore.
-            # zlib is also loaded by lm_linux.c (display-manager) and
-            # networking_common.c (gzip decode) — same static libz.a covers all.
-            sed -i '1i #define FF_DISABLE_DLOPEN 1' src/logo/image/image.c
-            sed -i '1i #define FF_DISABLE_DLOPEN 1' src/logo/image/im7.c
-            sed -i '1i #define FF_DISABLE_DLOPEN 1' src/detection/lm/lm_linux.c
-            sed -i '1i #define FF_DISABLE_DLOPEN 1' src/common/impl/networking_common.c
+            # linux-static-link-per-tu.patch makes these libraries' references
+            # direct; link them from their static archives (-L/-l only:
+            # pkg-config's "other" flags are compiler-driver flags ld rejects,
+            # and pthread lives in musl's libc).
+            #
             # MagickCore.a pulls C++ transitive deps (e.g. libultrahdr), so the
             # otherwise-C binary needs the C++ runtime. Under the engine that is
             # libc++ (not libstdc++, absent from the sysroot). It is NOT added
@@ -861,65 +851,22 @@
             # even breaks the CMake C-compiler check). Instead -lc++ is passed
             # bare via CMAKE_EXE_LINKER_FLAGS below (cmake puts it straight on
             # the link line). MagickCore's -L/-l still ride NIX_LDFLAGS fine.
-            r10Logo="$($PKG_CONFIG --static --libs-only-L chafa zlib MagickCore) $($PKG_CONFIG --static --libs-only-l chafa zlib MagickCore)"
-            export NIX_LDFLAGS="$NIX_LDFLAGS $r10Logo"
+            logoLibs="$($PKG_CONFIG --static --libs-only-L chafa zlib MagickCore) $($PKG_CONFIG --static --libs-only-l chafa zlib MagickCore)"
+            export NIX_LDFLAGS="$NIX_LDFLAGS $logoLibs"
 
-            # Round 10 (cont.): the remaining self-contained libs the binary
-            # used to dlopen from the host. Each leaf TU loads exactly one of
-            # these (verified), so FF_DISABLE_DLOPEN per-file is safe and only
-            # makes that lib's refs direct. All are plain C (no extra runtime).
-            #   dbus-1   -> common/impl/dbus.c
-            #   ddcutil  -> detection/brightness/brightness_linux.c
-            #   libdrm   -> detection/displayserver/linux/drm.c
-            #   drm_amdgpu -> detection/gpu/gpu_drm.c
-            #   xcb-randr -> detection/displayserver/linux/xcb.c
-            #   Xrandr   -> detection/displayserver/linux/xlib.c
-            #   libelf   -> common/impl/binary_linux.c
-            # xfconf/libxfce4util is handled separately below (it needs a source
-            # patch + a new xfce4 dep, not just a per-TU flip).
-            for f in \
-              src/common/impl/dbus.c \
-              src/detection/brightness/brightness_linux.c \
-              src/detection/displayserver/linux/drm.c \
-              src/detection/gpu/gpu_drm.c \
-              src/detection/displayserver/linux/xcb.c \
-              src/detection/displayserver/linux/xlib.c \
-              src/common/impl/binary_linux.c ; do
-              sed -i '1i #define FF_DISABLE_DLOPEN 1' "$f"
-            done
-            # xfce4util: fastfetch stubs the static path out ("dlopen is
-            # disabled", unique in this file). Replace it with a direct call to
-            # the self-declared xfce_version_string(), then flip the TU static.
-            sed -i 's#return "dlopen is disabled";#{ const char* xfce_version_string(void); ffStrbufSetS(result, xfce_version_string()); return NULL; }#' \
-              src/detection/de/de_linux.c
-            sed -i '1i #define FF_DISABLE_DLOPEN 1' src/detection/de/de_linux.c
-            # libdrm_amdgpu is a separate .pc/.a from libdrm (amdgpu_* syms,
-            # used by gpu_drm.c). ddcutil.a drags a closure that ddcutil.pc
-            # does NOT declare (its Requires line is commented out, Libs is
-            # just -lddcutil): glib-2.0, jansson, libacl, gudev-1.0, libusb-1.0,
-            # libudev, and backtrace (libexecinfo on musl) — list them all.
-            r10pcs="dbus-1 ddcutil libdrm libdrm_amdgpu glib-2.0 jansson libacl gudev-1.0 libusb-1.0 libudev xcb-randr xrandr libelf libxfce4util-1.0"
-            r10Rest="$($PKG_CONFIG --static --libs-only-L $r10pcs) $($PKG_CONFIG --static --libs-only-l $r10pcs)"
-            export NIX_LDFLAGS="$NIX_LDFLAGS $r10Rest -lexecinfo"
+            # libdrm_amdgpu is a separate .pc/.a from libdrm. ddcutil.a drags a
+            # closure that ddcutil.pc does NOT declare (its Requires line is
+            # commented out, Libs is just -lddcutil): glib-2.0, jansson, libacl,
+            # gudev-1.0, libusb-1.0, libudev, and backtrace (libexecinfo on
+            # musl) — list them all.
+            restPcs="dbus-1 ddcutil libdrm libdrm_amdgpu glib-2.0 jansson libacl gudev-1.0 libusb-1.0 libudev xcb-randr xrandr libelf libxfce4util-1.0"
+            restLibs="$($PKG_CONFIG --static --libs-only-L $restPcs) $($PKG_CONFIG --static --libs-only-l $restPcs)"
+            export NIX_LDFLAGS="$NIX_LDFLAGS $restLibs -lexecinfo"
 
-            # GSettings (Theme/Icons/Font/Cursor/WMTheme/TerminalFont) via the
-            # embedded static dconf backend instead of dlopen'ing host libgio.
-            # FF_DISABLE_DLOPEN on settings.c makes its g_settings_*/g_variant_*
-            # refs link directly from our static glib; the dconf backend is
-            # pulled from dconfStatic below. Register it once at main() entry
-            # (before any GSettings use — g_settings_backend_get_default caches
-            # the default on first call).
-            sed -i '1i #define FF_DISABLE_DLOPEN 1' src/common/impl/settings.c
-            awk '/^int main\(int argc, char\*\* argv\)/{print; getline; print; print "    { extern void dconf_register_static_gsettings_backend(void); dconf_register_static_gsettings_backend(); }"; next} {print}' \
-              src/fastfetch.c > src/fastfetch.c.new && mv src/fastfetch.c.new src/fastfetch.c
-            # FF_DISABLE_DLOPEN flips the WHOLE settings.c, so its GSettings,
-            # GVariant and sqlite3 refs all become direct — link glib + sqlite3
-            # statically. ($PKG_CONFIG is the cross wrapper; bare `pkg-config`
-            # isn't on PATH in pkgsStatic.)
-            # NIX_LDFLAGS goes straight to ld, so take only -L/-l from
-            # pkg-config (the "other" category carries compiler-driver flags
-            # like -pthread / -Wl,... that ld rejects; both are unneeded here,
-            # pthread living in libc under musl).
+            # settings.c's GSettings, GVariant and sqlite3 refs are direct, and
+            # the dconf backend comes from dconfStatic (registered at main() by
+            # register-dconf-backend.patch). ($PKG_CONFIG is the cross wrapper;
+            # bare `pkg-config` isn't on PATH in pkgsStatic.)
             gtkLibs="$($PKG_CONFIG --static --libs-only-L gio-2.0 gio-unix-2.0 sqlite3) $($PKG_CONFIG --static --libs-only-l gio-2.0 gio-unix-2.0 sqlite3)"
             export NIX_LDFLAGS="$NIX_LDFLAGS -L${dconfStatic}/lib -l:libdconfsettings.a -l:libdconf-engine.a -l:libdconf-gdbus-thread.a -l:libdconf-common.a -l:libgvdb.a -l:libdconf-shm.a $gtkLibs"
           '';
@@ -1008,24 +955,19 @@
               p.chafa.dev
               p.wayland.dev
             ];
+          patches = (old.patches or [ ]) ++ [
+            ./patches/no-copy-dt-needed-entries.patch
+            ./patches/register-dconf-backend.patch
+          ];
           preConfigure = (old.preConfigure or "") + ''
             mkdir -p build
             cp ${p.hwdata}/share/hwdata/pci.ids build/pci.ids
             cp ${p.libdrm}/share/libdrm/amdgpu.ids build/amdgpu.ids
             chmod +w build/pci.ids build/amdgpu.ids
-            # BINARY_LINK_TYPE=static makes CMakeLists add GNU ld's
-            # -Wl,--copy-dt-needed-entries, which our lld linker rejects
-            # ("unknown argument"). It only matters for indirect DT_NEEDED of
-            # shared libs; this is a fully static link, so drop the flag.
-            substituteInPlace CMakeLists.txt \
-              --replace-fail ' -Wl,--copy-dt-needed-entries' ""
             # GSettings (theme/icons/font/cursor/WMTheme) via the embedded
             # static dconf backend — same as the primary targets.
             # BINARY_LINK_TYPE=static already direct-links settings.c's
-            # glib/gio/sqlite3 refs; register the dconf backend at main() so
-            # user-db values resolve (not just schema defaults).
-            awk '/^int main\(int argc, char\*\* argv\)/{print; getline; print; print "    { extern void dconf_register_static_gsettings_backend(void); dconf_register_static_gsettings_backend(); }"; next} {print}' \
-              src/fastfetch.c > src/fastfetch.c.new && mv src/fastfetch.c.new src/fastfetch.c
+            # glib/gio/sqlite3 refs.
             gtkLibs="$($PKG_CONFIG --static --libs-only-L gio-2.0 gio-unix-2.0 sqlite3) $($PKG_CONFIG --static --libs-only-l gio-2.0 gio-unix-2.0 sqlite3)"
             # C++ runtime (libc++) for MagickCore.a's C++ deps is passed bare
             # via CMAKE_EXE_LINKER_FLAGS below, NOT here: the cc-wrapper "-Wl,"-

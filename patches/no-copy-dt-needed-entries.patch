@@ -1,0 +1,15 @@
+BINARY_LINK_TYPE=static adds GNU ld's -Wl,--copy-dt-needed-entries,
+which lld rejects. It only affects indirect DT_NEEDED of shared
+libraries, and this link has none.
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1538,7 +1538,7 @@
+     message(STATUS "Enabling custom link type: ${BINARY_LINK_TYPE}")
+     target_compile_definitions(libfastfetch PRIVATE FF_DISABLE_DLOPEN=1)
+     if(NOT WIN32)
+-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--copy-dt-needed-entries")
++        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
+     endif()
+ endif()
+ 
