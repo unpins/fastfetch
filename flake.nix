@@ -205,94 +205,6 @@
             }
           '';
 
-          # Replacement foreign_compile() body for dlopen.c. Upstream's
-          # version posix_spawn'd `cc` at runtime to compile the HELPER
-          # macro from in-memory C source. We skip that entirely.
-          #
-          # First-choice path: memfd_create — write the embedded helper
-          # bytes to an anonymous in-memory file, then hand elf_exec the
-          # /proc/self/fd/N path. Zero disk write. The fd is leaked on
-          # purpose: it must outlive foreign_compile() so that elf_exec
-          # can open() the proc-fd path; process exit clears it.
-          #
-          # Fallback path (kernel < 3.17 or seccomp blocks memfd_create):
-          # extract to /tmp/.musl_dlopen_helper/helper. mtime-cache so
-          # repeated runs of the same fastfetch binary skip the write.
-          # /tmp chosen over $HOME because it's typically tmpfs (cleans
-          # up at reboot) and the helper is ephemeral per-session.
-          foreignCompileBody = builtins.toFile "foreign_compile_body.c" ''
-            extern unsigned char glibc_helper_data[];
-            extern unsigned int  glibc_helper_data_len;
-            extern unsigned char musl_helper_data[];
-            extern unsigned int  musl_helper_data_len;
-
-            /*
-             * Pick the embedded helper that matches the host's libc.
-             * Signal = presence of the canonical ld.so for each libc:
-             *   /lib64/ld-linux-x86-64.so.2 (glibc x86_64)
-             *   /lib/ld-linux-aarch64.so.1  (glibc aarch64)
-             *   /lib/ld-musl-x86_64.so.1    (musl  x86_64)
-             *   /lib/ld-musl-aarch64.so.1   (musl  aarch64)
-             * glibc-first because hybrid systems (gcompat, chimera) ship
-             * glibc compat and we'd rather load the more-portable glibc
-             * libs there. Returns 0 if no known libc is detected.
-             */
-            static int pick_helper(unsigned char **data, unsigned int *len) {
-            #if defined(__x86_64__)
-              if (access("/lib64/ld-linux-x86-64.so.2", F_OK) == 0) {
-                *data = glibc_helper_data; *len = glibc_helper_data_len; return 1;
-              }
-              if (access("/lib/ld-musl-x86_64.so.1", F_OK) == 0) {
-                *data = musl_helper_data; *len = musl_helper_data_len; return 1;
-              }
-            #elif defined(__aarch64__)
-              if (access("/lib/ld-linux-aarch64.so.1", F_OK) == 0) {
-                *data = glibc_helper_data; *len = glibc_helper_data_len; return 1;
-              }
-              /* aarch64 musl helper not built yet — ld-musl-aarch64.so.1
-                 detection would route to a 1-byte placeholder, so skip it. */
-            #endif
-              return 0;
-            }
-
-            static bool foreign_compile(char exe[PATH_MAX]) {
-              unsigned char *data; unsigned int len;
-              if (!pick_helper(&data, &len)) return false;
-
-              int memfd = memfd_create("dlopen_helper", 0);
-              if (memfd >= 0) {
-                ssize_t off = 0;
-                while (off < (ssize_t)len) {
-                  ssize_t r = write(memfd, data + off, len - off);
-                  if (r < 0) { close(memfd); goto disk_fallback; }
-                  off += r;
-                }
-                snprintf(exe, PATH_MAX, "/proc/self/fd/%d", memfd);
-                return true;
-              }
-            disk_fallback:
-              my_strlcpy(exe, "/tmp/.musl_dlopen_helper", PATH_MAX);
-              if (mkdir(exe, 0755) && errno != EEXIST) return false;
-              my_strlcat(exe, "/helper", PATH_MAX);
-              switch (is_file_newer_than(get_program_executable_name(), exe)) {
-                case 0: return true;
-                case 1: case 2: break;
-                default: return false;
-              }
-              char tmp[PATH_MAX];
-              my_strlcpy(tmp, exe, PATH_MAX);
-              my_strlcat(tmp, ".tmpXXXXXX", PATH_MAX);
-              int tmpfd = mkstemp(tmp);
-              if (tmpfd == -1) return false;
-              ssize_t w = write(tmpfd, data, len);
-              fchmod(tmpfd, 0755);
-              close(tmpfd);
-              if (w != (ssize_t)len) { unlink(tmp); return false; }
-              if (rename(tmp, exe) == -1) { unlink(tmp); return false; }
-              return true;
-            }
-          '';
-
           # polyfillGlibc: tool that rewrites a binary's glibc symbol-version
           # references to target an older floor. Self-contained C11 + ninja
           # build from upstream sources.
@@ -416,68 +328,31 @@
               # aarch64 musl cross-build path not yet wired. Embed a 1-byte
               # placeholder so xxd-i emits a valid C symbol; foreign_compile
               # never references it because the aarch64 detection branch
-              # only checks the glibc ld.so path (see foreignCompileBody).
+              # only checks the glibc ld.so path (pick_helper() in
+              # patches/graphicsgd-dlopen-embedded-helper.patch).
               pkgs.runCommand "musl-helper-placeholder" { } ''
                 mkdir -p $out/bin
                 printf '\0' > $out/bin/fdlhelper
               '';
 
           # tlsTrampoline: static archive built from graphics.gd's dlopen.c
-          # + foreign_tramp.S + the xxd-i'd fdlhelper bytes. Patches applied
-          # at postPatch (see comments inline):
-          #   1. Drop the HELPER macro (no runtime-cc compilation; helper
-          #      is embedded pre-built)
-          #   2. Replace foreign_compile() with embed-extract version
-          #   3. Rename public dlopen→__wrap_dlopen (etc.) so linker
-          #      --wrap=NAME flags route fastfetch's POSIX calls through
-          #      our patched impl
+          # + foreign_tramp.S + the xxd-i'd fdlhelper bytes (see the patch
+          # header for what changes in dlopen.c).
           tlsTrampoline = pkgs.pkgsStatic.stdenv.mkDerivation {
             pname = "graphicsgd-dlopen-static";
             version = "07c79b4";
             src = graphicsgd-src;
             sourceRoot = "source/startup/internal/dlopen";
             nativeBuildInputs = [ pkgs.xxd ];
+            patches = [ ./patches/graphicsgd-dlopen-embedded-helper.patch ];
             postPatch = ''
-              # 1. Embed both pre-built helpers via xxd -i. The static
-              #    main binary detects host libc at first dlopen and
-              #    extracts whichever helper matches.
+              # Embed both pre-built helpers via xxd -i. The static main
+              # binary detects the host libc at first dlopen and extracts
+              # whichever helper matches.
               cp ${glibcHelper}/bin/fdlhelper glibc_helper
               xxd -i -n glibc_helper_data glibc_helper > glibc_helper_data.c
               cp ${muslHelper}/bin/fdlhelper musl_helper
               xxd -i -n musl_helper_data musl_helper > musl_helper_data.c
-
-              # 2. Strip HELPER macro from dlopen.c (no longer used; the
-              #    embed-extract foreign_compile we insert next reads bytes).
-              sed -i '/^#define HELPER \\$/,/^  "}\\n"$/d' dlopen.c
-
-              # 3. Strip the runtime-cc foreign_compile() body.
-              sed -i '/^static bool foreign_compile(char exe\[PATH_MAX\]) {$/,/^}$/d' dlopen.c
-
-              # 4. Insert our embed-extract foreign_compile() right before
-              #    the foreign_setup() that calls it. Uses an awk getline
-              #    loop to splice contents of foreignCompileBody verbatim.
-              awk -v insert='${foreignCompileBody}' '
-                /^static void foreign_setup\(void\) \{$/ && !done {
-                  while ((getline line < insert) > 0) print line
-                  close(insert)
-                  done = 1
-                }
-                { print }
-              ' dlopen.c > dlopen.c.new
-              mv dlopen.c.new dlopen.c
-
-              # 5. Rename public dlopen/dlsym/dlclose/dlerror → __wrap_*.
-              #    fastfetch's library.h emits POSIX dlopen/dlsym/dlclose
-              #    calls; linker --wrap=NAME rewrites them to __wrap_NAME,
-              #    which our patched dlopen.c now provides. Other public
-              #    APIs (dlsym_raw, dlopen_callback_*, dlopen_set_*) keep
-              #    their names — fastfetch doesn't call them.
-              sed -i \
-                -e 's|^void \*dlopen(const char \*path, int mode) {$|void *__wrap_dlopen(const char *path, int mode) {|' \
-                -e 's|^void \*dlsym(void \*handle, const char \*name) {$|void *__wrap_dlsym(void *handle, const char *name) {|' \
-                -e 's|^int dlclose(void \*handle) {$|int __wrap_dlclose(void *handle) {|' \
-                -e 's|^char \*dlerror(void) {$|char *__wrap_dlerror(void) {|' \
-                dlopen.c
             '';
             buildPhase = ''
               runHook preBuild
@@ -510,18 +385,9 @@
           # `R_X86_64_32 against hidden symbol __TMC_END__ in crtbeginT.o`
           # (mesmo padrão de libyuv ver
           # [[feedback_pkgsstatic_imagemagick_chain_patches]] #3).
-          # Sed troca SHARED→STATIC na linha do else-Linux.
           vulkanLoaderOverlay = final: prev: {
             vulkan-loader = prev.vulkan-loader.overrideAttrs (old: {
-              postPatch = (old.postPatch or "") + ''
-                substituteInPlace loader/CMakeLists.txt \
-                  --replace-fail "add_library(vulkan SHARED)" \
-                                 "add_library(vulkan STATIC)" \
-                  --replace-fail "install(TARGETS vulkan EXPORT VulkanLoaderConfig)" \
-                                 "install(TARGETS vulkan)" \
-                  --replace-fail "install(EXPORT VulkanLoaderConfig DESTINATION \''${CMAKE_INSTALL_LIBDIR}/cmake/VulkanLoader NAMESPACE Vulkan::)" \
-                                 ""
-              '';
+              patches = (old.patches or [ ]) ++ [ ./patches/vulkan-loader-static-library.patch ];
             });
           };
           # ocl-icd 2.3.4: Makefile.am builda `noinst_PROGRAMS=run_dummy_
@@ -530,21 +396,10 @@
           # Em glibc/shared, ld resolve weak<strong via versioning. Em
           # musl-static, ld é estrito → "multiple definition" pra ~600
           # funções OpenCL. Esses noinst são só pra UPDATE_DATABASE
-          # workflow do upstream, fastfetch não usa. Esvazia o var.
+          # workflow do upstream, fastfetch não usa.
           oclIcdOverlay = final: prev: {
             ocl-icd = prev.ocl-icd.overrideAttrs (old: {
-              postPatch = (old.postPatch or "") + ''
-                # Esvaziar noinst_PROGRAMS e deletar todo o bloco
-                # `if UPDATE_DATABASE … endif` (que referencia o test
-                # binary deletado e que automake -Werror não aceita
-                # sintaxe órfã). Sed range entre marcadores.
-                sed -i \
-                  -e 's|^noinst_PROGRAMS=run_dummy_icd_through_our_ICDL|noinst_PROGRAMS =|' \
-                  -e '/run_dummy_icd_through_our_ICDL/d' \
-                  -e '/^[[:space:]]*run_dummy_icd_gen\.c run_dummy_icd_weak_gen\.c$/d' \
-                  -e '/^if UPDATE_DATABASE$/,/^endif$/d' \
-                  Makefile.am
-              '';
+              patches = (old.patches or [ ]) ++ [ ./patches/ocl-icd-no-test-programs.patch ];
             });
           };
           ddcutilOverlay = final: prev: {
@@ -673,11 +528,7 @@
               doCheck = false;
               doInstallCheck = false;
             } // prev.lib.optionalAttrs prev.stdenv.hostPlatform.isPower {
-              postPatch = (old.postPatch or "") + ''
-                substituteInPlace CMakeLists.txt \
-                  --replace-fail 'message(FATAL_ERROR "Architecture: ''${CMAKE_SYSTEM_PROCESSOR} not recognized")' \
-                                 'set(ARCH "generic")'
-              '';
+              patches = (old.patches or [ ]) ++ [ ./patches/libultrahdr-generic-arch-fallback.patch ];
               cmakeFlags = (old.cmakeFlags or [ ]) ++ [ "-DUHDR_ENABLE_INTRINSICS=0" ];
             });
           };
@@ -757,32 +608,7 @@
             mesonFlags = (o.mesonFlags or [ ]) ++ [
               "-Dbash_completion=false" "-Dman=false" "-Dvapi=false" "-Dgtk_doc=false"
             ];
-            postPatch = (o.postPatch or "") + ''
-              sed -i \
-                -e "/subdir('service')/d" \
-                -e "/subdir('bin')/d" \
-                -e "/subdir('docs')/d" \
-                -e "/subdir('tests')/d" \
-                -e "/subdir('client')/d" \
-                -e "/meson.add_install_script/d" \
-                meson.build
-              sed -i \
-                -e "s/shared_library(/static_library(/" \
-                -e "/install: true,/d" \
-                -e "/install_dir: gio_module_dir,/d" \
-                -e "/link_args: ldflags,/d" \
-                -e "/link_depends: symbol_map,/d" \
-                -e "s/c_args: dconf_c_args,/c_args: dconf_c_args, pic: true,/" \
-                gsettings/meson.build
-              {
-                printf '\n__attribute__((visibility("default")))\n'
-                printf 'void dconf_register_static_gsettings_backend (void) {\n'
-                printf '  g_io_extension_point_register (G_SETTINGS_BACKEND_EXTENSION_POINT_NAME);\n'
-                printf '  g_io_extension_point_implement (G_SETTINGS_BACKEND_EXTENSION_POINT_NAME,\n'
-                printf '                                  dconf_settings_backend_get_type (),\n'
-                printf '                                  "dconf", 100);\n}\n'
-              } >> gsettings/dconfsettingsbackend.c
-            '';
+            patches = (o.patches or [ ]) ++ [ ./patches/dconf-static-gsettings-backend.patch ];
             installPhase = ''
               runHook preInstall
               mkdir -p $out/lib $out/include/dconf

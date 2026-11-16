@@ -1,0 +1,53 @@
+Build only dconf's GSettings backend, as a static PIC library fastfetch
+links in, and add dconf_register_static_gsettings_backend() so the binary
+can register it at startup (a static backend is not found as a GIO module).
+
+--- a/meson.build
++++ b/meson.build
+@@ -96,13 +96,8 @@
+ subdir('gvdb')
+ subdir('common')
+ subdir('engine')
+-subdir('service')
+ subdir('gdbus')
+ subdir('gsettings')
+-subdir('client')
+-subdir('bin')
+-subdir('docs')
+-subdir('tests')
+ 
+ gnome.post_install(
+   gio_querymodules: gio_module_dir,
+--- a/gsettings/meson.build
++++ b/gsettings/meson.build
+@@ -6,14 +6,10 @@
+ symbol_map = join_paths(meson.current_source_dir(), 'symbol.map')
+ ldflags = cc.get_supported_link_arguments('-Wl,--version-script,@0@'.format(symbol_map))
+ 
+-libdconf_settings = shared_library(
++libdconf_settings = static_library(
+   'dconfsettings',
+   sources: 'dconfsettingsbackend.c',
+   include_directories: top_inc,
+   dependencies: backend_deps,
+-  c_args: dconf_c_args,
+-  link_args: ldflags,
+-  link_depends: symbol_map,
+-  install: true,
+-  install_dir: gio_module_dir,
++  c_args: dconf_c_args, pic: true,
+ )
+--- a/gsettings/dconfsettingsbackend.c
++++ b/gsettings/dconfsettingsbackend.c
+@@ -267,3 +267,11 @@
+   else
+     g_settings_backend_keys_changed (G_SETTINGS_BACKEND (dcsb), prefix, changes, origin_tag);
+ }
++
++__attribute__((visibility("default")))
++void dconf_register_static_gsettings_backend (void) {
++  g_io_extension_point_register (G_SETTINGS_BACKEND_EXTENSION_POINT_NAME);
++  g_io_extension_point_implement (G_SETTINGS_BACKEND_EXTENSION_POINT_NAME,
++                                  dconf_settings_backend_get_type (),
++                                  "dconf", 100);
++}

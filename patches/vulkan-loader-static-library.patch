@@ -1,0 +1,28 @@
+vulkan-loader hardcodes add_library(vulkan SHARED) on Linux (the static
+option is APPLE-only); a shared link fails under musl-static (R_X86_64_32
+against hidden __TMC_END__ in crtbeginT.o). Build the loader as a static
+library, and drop the CMake package export that only exists for SHARED.
+
+--- a/loader/CMakeLists.txt
++++ b/loader/CMakeLists.txt
+@@ -415,7 +415,7 @@
+         message(WARNING "The APPLE_STATIC_LOADER option has been set. Note that this will only work on MacOS and is not supported "
+                 "or tested as part of the loader. Use it at your own risk.")
+     else()
+-        add_library(vulkan SHARED)
++        add_library(vulkan STATIC)
+     endif()
+ 
+     target_sources(vulkan PRIVATE ${NORMAL_LOADER_SRCS})
+@@ -524,9 +524,9 @@
+ endif()
+ 
+ # Generate CMake Configuration File (IE: VulkanLoaderConfig.cmake)
+-install(TARGETS vulkan EXPORT VulkanLoaderConfig)
++install(TARGETS vulkan)
+ set_target_properties(vulkan PROPERTIES EXPORT_NAME "Loader")
+-install(EXPORT VulkanLoaderConfig DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/VulkanLoader NAMESPACE Vulkan::)
++
+ 
+ # Generate CMake Version File (IE: VulkanLoaderConfigVersion.cmake)
+ include(CMakePackageConfigHelpers)

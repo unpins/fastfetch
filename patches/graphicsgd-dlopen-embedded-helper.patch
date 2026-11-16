@@ -1,0 +1,247 @@
+Embed the pre-built fdlhelper instead of compiling it with cc at runtime.
+Drop the HELPER source macro and upstream's foreign_compile(), which
+posix_spawn'ed cc. The new foreign_compile() picks the embedded glibc or
+musl helper (glibc_helper_data.c, musl_helper_data.c, generated in
+postPatch) by which ld.so the host has. It writes the helper to a memfd,
+or falls back to /tmp/.musl_dlopen_helper when memfd_create is
+unavailable. dlopen, dlsym, dlclose and dlerror become __wrap_*, so
+fastfetch's calls reach them through ld --wrap.
+
+--- a/dlopen.c
++++ b/dlopen.c
+@@ -60,94 +60,6 @@
+ 
+ #define TLS_POOL_SIZE 64
+ 
+-#define HELPER \
+-  "#define _GNU_SOURCE\n" \
+-  "#include <dlfcn.h>\n" \
+-  "#include <stdio.h>\n" \
+-  "#include <stdlib.h>\n" \
+-  "#include <pthread.h>\n" \
+-  "#include <semaphore.h>\n" \
+-  "#include <stdint.h>\n" \
+-  "\n" \
+-  "#define TLS_POOL_SIZE 64\n" \
+-  "\n" \
+-  "/* TLS stack for nested trampoline calls (per-thread). */\n" \
+-  "__thread struct {\n" \
+-  "  long sp;\n" \
+-  "  void *stack[32];\n" \
+-  "} __tramp_ctx;\n" \
+-  "\n" \
+-  "/* TLS pool: array of glibc TLS pointers, one per pool thread. */\n" \
+-  "struct tls_pool {\n" \
+-  "  void *tls_ptrs[TLS_POOL_SIZE];      /* glibc TLS pointers */\n" \
+-  "  void *tramp_ctxs[TLS_POOL_SIZE];    /* per-thread __tramp_ctx addresses */\n" \
+-  "  sem_t ready;                         /* signaled when all threads ready */\n" \
+-  "  sem_t shutdown;                      /* signaled to shut down threads */\n" \
+-  "  int count;                           /* number of threads initialized */\n" \
+-  "  pthread_mutex_t lock;\n" \
+-  "} __tls_pool;\n" \
+-  "\n" \
+-  "static void *get_tls(void) {\n" \
+-  "  void *tls;\n" \
+-  "  __asm__ volatile(\"mov %%fs:0, %0\" : \"=r\"(tls));\n" \
+-  "  return tls;\n" \
+-  "}\n" \
+-  "\n" \
+-  "static void *pool_thread(void *arg) {\n" \
+-  "  int idx = (int)(intptr_t)arg;\n" \
+-  "  pthread_mutex_lock(&__tls_pool.lock);\n" \
+-  "  __tls_pool.tls_ptrs[idx] = get_tls();\n" \
+-  "  __tls_pool.tramp_ctxs[idx] = &__tramp_ctx;\n" \
+-  "  __tls_pool.count++;\n" \
+-  "  if (__tls_pool.count == TLS_POOL_SIZE) sem_post(&__tls_pool.ready);\n" \
+-  "  pthread_mutex_unlock(&__tls_pool.lock);\n" \
+-  "  sem_wait(&__tls_pool.shutdown); /* sleep forever */\n" \
+-  "  return NULL;\n" \
+-  "}\n" \
+-  "\n" \
+-  "int main(int argc, char **argv, char **envp) {\n" \
+-  "  char *ep;\n" \
+-  "  long addr;\n" \
+-  "  if (argc != 2) {\n" \
+-  "    fprintf(stderr, \"%s: not intended to be run directly\\n\", argv[0]);\n" \
+-  "    return 1;\n" \
+-  "  }\n" \
+-  "  addr = strtol(argv[1], &ep, 10);\n" \
+-  "  if (*ep) {\n" \
+-  "    fprintf(stderr, \"%s: invalid function address\\n\", argv[0]);\n" \
+-  "    return 2;\n" \
+-  "  }\n" \
+-  "  /* Initialize TLS pool */\n" \
+-  "  sem_init(&__tls_pool.ready, 0, 0);\n" \
+-  "  sem_init(&__tls_pool.shutdown, 0, 0);\n" \
+-  "  pthread_mutex_init(&__tls_pool.lock, NULL);\n" \
+-  "  __tls_pool.count = 0;\n" \
+-  "  /* Slot 0 is for main thread */\n" \
+-  "  __tls_pool.tls_ptrs[0] = get_tls();\n" \
+-  "  __tls_pool.tramp_ctxs[0] = &__tramp_ctx;\n" \
+-  "  __tls_pool.count = 1;\n" \
+-  "  /* Create pool threads */\n" \
+-  "  pthread_attr_t attr;\n" \
+-  "  pthread_attr_init(&attr);\n" \
+-  "  pthread_attr_setstacksize(&attr, 16384); /* minimal stack */\n" \
+-  "  for (int i = 1; i < TLS_POOL_SIZE; i++) {\n" \
+-  "    pthread_t t;\n" \
+-  "    pthread_create(&t, &attr, pool_thread, (void*)(intptr_t)i);\n" \
+-  "    pthread_detach(t);\n" \
+-  "  }\n" \
+-  "  pthread_attr_destroy(&attr);\n" \
+-  "  /* Wait for all pool threads to be ready */\n" \
+-  "  while (__tls_pool.count < TLS_POOL_SIZE) {\n" \
+-  "    sem_wait(&__tls_pool.ready);\n" \
+-  "  }\n" \
+-  "  return ((int (*)(void *))addr)((void *[]){\n" \
+-  "      dlopen,\n" \
+-  "      dlsym,\n" \
+-  "      dlclose,\n" \
+-  "      dlerror,\n" \
+-  "      &__tls_pool,\n" \
+-  "  });\n" \
+-  "}\n"
+ 
+ struct Loaded {
+   char *base;
+@@ -754,49 +666,77 @@
+ #endif
+ }
+ 
++
++extern unsigned char glibc_helper_data[];
++extern unsigned int  glibc_helper_data_len;
++extern unsigned char musl_helper_data[];
++extern unsigned int  musl_helper_data_len;
++
++/*
++ * Pick the embedded helper that matches the host's libc.
++ * Signal = presence of the canonical ld.so for each libc:
++ *   /lib64/ld-linux-x86-64.so.2 (glibc x86_64)
++ *   /lib/ld-linux-aarch64.so.1  (glibc aarch64)
++ *   /lib/ld-musl-x86_64.so.1    (musl  x86_64)
++ *   /lib/ld-musl-aarch64.so.1   (musl  aarch64)
++ * glibc-first because hybrid systems (gcompat, chimera) ship
++ * glibc compat and we'd rather load the more-portable glibc
++ * libs there. Returns 0 if no known libc is detected.
++ */
++static int pick_helper(unsigned char **data, unsigned int *len) {
++#if defined(__x86_64__)
++  if (access("/lib64/ld-linux-x86-64.so.2", F_OK) == 0) {
++    *data = glibc_helper_data; *len = glibc_helper_data_len; return 1;
++  }
++  if (access("/lib/ld-musl-x86_64.so.1", F_OK) == 0) {
++    *data = musl_helper_data; *len = musl_helper_data_len; return 1;
++  }
++#elif defined(__aarch64__)
++  if (access("/lib/ld-linux-aarch64.so.1", F_OK) == 0) {
++    *data = glibc_helper_data; *len = glibc_helper_data_len; return 1;
++  }
++  /* aarch64 musl helper not built yet — ld-musl-aarch64.so.1
++     detection would route to a 1-byte placeholder, so skip it. */
++#endif
++  return 0;
++}
++
+ static bool foreign_compile(char exe[PATH_MAX]) {
+-  my_strlcpy(exe, get_tmp_dir(), PATH_MAX);
+-  my_strlcat(exe, "/.musl_dlopen_helper", PATH_MAX);
++  unsigned char *data; unsigned int len;
++  if (!pick_helper(&data, &len)) return false;
++
++  int memfd = memfd_create("dlopen_helper", 0);
++  if (memfd >= 0) {
++    ssize_t off = 0;
++    while (off < (ssize_t)len) {
++      ssize_t r = write(memfd, data + off, len - off);
++      if (r < 0) { close(memfd); goto disk_fallback; }
++      off += r;
++    }
++    snprintf(exe, PATH_MAX, "/proc/self/fd/%d", memfd);
++    return true;
++  }
++disk_fallback:
++  my_strlcpy(exe, "/tmp/.musl_dlopen_helper", PATH_MAX);
+   if (mkdir(exe, 0755) && errno != EEXIST) return false;
+   my_strlcat(exe, "/helper", PATH_MAX);
+-
+   switch (is_file_newer_than(get_program_executable_name(), exe)) {
+     case 0: return true;
+     case 1: case 2: break;
+     default: return false;
+   }
+-
+-  char src[PATH_MAX];
+-  my_strlcpy(src, exe, PATH_MAX);
+-  my_strlcat(src, ".c", PATH_MAX);
+-
+-  int fd = open(src, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+-  if (fd == -1) return false;
+-  if (write(fd, HELPER, sizeof(HELPER)-1) != sizeof(HELPER)-1) {
+-    close(fd); unlink(src); return false;
+-  }
+-  close(fd);
+-
+   char tmp[PATH_MAX];
+   my_strlcpy(tmp, exe, PATH_MAX);
+   my_strlcat(tmp, ".tmpXXXXXX", PATH_MAX);
+   int tmpfd = mkstemp(tmp);
+-  if (tmpfd == -1) { unlink(src); return false; }
++  if (tmpfd == -1) return false;
++  ssize_t w = write(tmpfd, data, len);
++  fchmod(tmpfd, 0755);
+   close(tmpfd);
+-
+-  char *args[] = {"cc", "-pie", "-fPIC", src, "-o", tmp, "-ldl", NULL};
+-  pid_t pid;
+-  int status;
+-  if (posix_spawnp(&pid, "cc", NULL, NULL, args, environ) != 0) {
+-    unlink(tmp); unlink(src); return false;
+-  }
+-  waitpid(pid, &status, 0);
+-  unlink(src);
+-  if (status != 0) { unlink(tmp); return false; }
++  if (w != (ssize_t)len) { unlink(tmp); return false; }
+   if (rename(tmp, exe) == -1) { unlink(tmp); return false; }
+   return true;
+ }
+-
+ static void foreign_setup(void) {
+   char exe[PATH_MAX];
+   if (!foreign_compile(exe)) {
+@@ -851,7 +791,7 @@
+  * TLS context rather than corrupting it by switching to native.
+  */
+ __attribute__((noinline))
+-void *dlopen(const char *path, int mode) {
++void *__wrap_dlopen(const char *path, int mode) {
+   if (!foreign_init()) return NULL;
+   void *saved_tls = get_current_tls();
+   set_current_tls(get_thread_foreign_tls());
+@@ -1034,7 +974,7 @@
+ }
+ 
+ __attribute__((noinline))
+-void *dlsym(void *handle, const char *name) {
++void *__wrap_dlsym(void *handle, const char *name) {
+   if (!foreign_init()) return NULL;
+   void *saved_tls = get_current_tls();
+   set_current_tls(get_thread_foreign_tls());
+@@ -1063,7 +1003,7 @@
+   return foreign_wrap(real_func);
+ }
+ 
+-int dlclose(void *handle) {
++int __wrap_dlclose(void *handle) {
+   if (!foreign_init()) return -1;
+   void *saved_tls = get_current_tls();
+   set_current_tls(get_thread_foreign_tls());
+@@ -1072,7 +1012,7 @@
+   return result;
+ }
+ 
+-char *dlerror(void) {
++char *__wrap_dlerror(void) {
+   if (!foreign_init()) return dlerror_buf;
+   void *saved_tls = get_current_tls();
+   set_current_tls(get_thread_foreign_tls());
