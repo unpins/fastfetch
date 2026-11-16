@@ -556,14 +556,6 @@
             "libpulseaudio" "dconf"
             "libglvnd"
             "xfconf"
-            # efl (Enlightenment Foundation Libraries): new buildInput in
-            # fastfetch 2.63.1 (26.05), used only to detect the Enlightenment
-            # desktop/WM. It propagates libpulseaudio (meta.badPlatforms on
-            # musl-static -> refuses to evaluate) and is a heavy multimedia
-            # stack. Enlightenment is a niche DE; drop it (user-approved
-            # 2026-06-04). All other DE/WM detection (GNOME/KDE/wlroots/...)
-            # is unaffected.
-            "efl"
           ];
           # nixpkgs points CUSTOM_{PCI,AMDGPU}_IDS_PATH at hwdata/libdrm in the
           # store, and upstream feeds those to FF_STR() (CMakeLists passes them
@@ -763,17 +755,9 @@
           # package's contract stays strict. The symbols are FF_A_WEAK_IMPORT
           # + NULL-guarded, so they degrade gracefully if a future macOS drops
           # the framework.
-          # Disable the wrap (see Linux branches): wrapProgram =
-          # makeBinaryWrapper compiles a Mach-O wrapper we discard anyway; the
-          # shipped artifact must be the bare Mach-O (otool-L allowlist). No
-          # wrap → no makeBinaryWrapper compile.
+          # No wrapProgram (see the Linux branches): the shipped artifact
+          # must be the bare Mach-O (otool -L allowlist).
           postInstall = "";
-          dontWrapGApps = true;
-          postFixup = ''
-            if [ -e $out/bin/.fastfetch-wrapped ]; then
-              mv -f $out/bin/.fastfetch-wrapped $out/bin/fastfetch
-            fi
-          '' + (old.postFixup or "");
           # MoltenVK lives in fastfetch's propagatedBuildInputs (buildInputs
           # is empty on darwin). Drop it there — it has no pkgsStatic build
           # (spirv-tools/MoltenVK static fails), and ENABLE_VULKAN=Off below
@@ -796,24 +780,14 @@
         # doesn't expose. fastfetch only bakes ${python3.interpreter} into
         # shell completions the bin-only artifact never ships.
         ((p.fastfetch.override { python3 = pkgs.buildPackages.python3; }).overrideAttrs (old: {
-          # nixpkgs wraps fastfetch (LD_LIBRARY_PATH prefix via wrapProgram,
-          # plus wrapGAppsHook) — pointless for a static 0-DT_NEEDED binary,
-          # and the wrapper was discarded below anyway. Disable it: under the
-          # engine `wrapProgram` = makeBinaryWrapper, which compiles the C
-          # wrapper with `-x c` from stdin; the engine cc then appends the
-          # sysroot crt objects into that still-open `-x c` scope, so clang
-          # tries to *compile* crt1.o (-Werror,-Wnull-character on its ELF
-          # bytes) and the build dies. No wrapper built → no such compile.
+          # nixpkgs' postInstall wraps fastfetch with an LD_LIBRARY_PATH
+          # prefix — pointless for a static 0-DT_NEEDED binary. It also
+          # breaks the build: under the engine `wrapProgram` =
+          # makeBinaryWrapper, which compiles the C wrapper with `-x c` from
+          # stdin; the engine cc then appends the sysroot crt objects into
+          # that still-open `-x c` scope, so clang tries to *compile* crt1.o
+          # (-Werror,-Wnull-character on its ELF bytes).
           postInstall = "";
-          dontWrapGApps = true;
-          # Defensive: if any hook still binary-wraps, keep the bare static
-          # ELF as the shipped artifact (the wrapper points at absent
-          # /nix/store paths). No-op once the wrap is disabled above.
-          postFixup = ''
-            if [ -e $out/bin/.fastfetch-wrapped ]; then
-              mv -f $out/bin/.fastfetch-wrapped $out/bin/fastfetch
-            fi
-          '' + (old.postFixup or "");
           propagatedBuildInputs = builtins.filter
             (x: !(builtins.elem (x.pname or x.name or "") dropDeps))
             (old.propagatedBuildInputs or [ ]);
@@ -970,12 +944,9 @@
             "-DENABLE_GLX=Off"
             "-DENABLE_XCB_RANDR=On"
             "-DENABLE_XRANDR=On"
-            "-DENABLE_XFCONF=Off"
             "-DENABLE_WAYLAND=On"
             "-DENABLE_DRM=On"
             "-DENABLE_DRM_AMDGPU=On"
-            "-DENABLE_LUA=Off"
-            "-DENABLE_QUICKJS=Off"
             "-DENABLE_DBUS=On"
             "-DENABLE_PULSE=Off"
             "-DENABLE_DCONF=Off"
@@ -1012,18 +983,8 @@
         # doesn't expose. fastfetch only bakes ${python3.interpreter} into
         # shell completions the bin-only artifact never ships.
         ((p.fastfetch.override { python3 = pkgs.buildPackages.python3; }).overrideAttrs (old: {
-          # Disable the wrap (see useDlopen branch): under the engine
-          # wrapProgram = makeBinaryWrapper, whose `-x c` stdin compile makes
-          # the cc append the sysroot crt objects into the open `-x c` scope,
-          # so clang tries to compile crt1.o and fails. Useless here anyway —
-          # static 0-DT_NEEDED binary, and the wrapper was discarded below.
+          # No wrapProgram (see the useDlopen branch).
           postInstall = "";
-          dontWrapGApps = true;
-          postFixup = ''
-            if [ -e $out/bin/.fastfetch-wrapped ]; then
-              mv -f $out/bin/.fastfetch-wrapped $out/bin/fastfetch
-            fi
-          '' + (old.postFixup or "");
           propagatedBuildInputs = builtins.filter
             (x: !(builtins.elem (x.pname or x.name or "") dropDeps))
             (old.propagatedBuildInputs or [ ]);
@@ -1086,7 +1047,7 @@
             "-DENABLE_DRM_AMDGPU=On"
             "-DENABLE_DBUS=On"
             "-DENABLE_GIO=On"
-            "-DENABLE_DCONF=On"
+            "-DENABLE_DCONF=Off"
             "-DENABLE_DDCUTIL=On"
             "-DENABLE_IMAGEMAGICK7=On"
             "-DENABLE_IMAGEMAGICK6=Off"
@@ -1096,7 +1057,6 @@
             "-DENABLE_OPENCL=Off"
             "-DENABLE_EGL=Off"
             "-DENABLE_GLX=Off"
-            "-DENABLE_XFCONF=Off"
             "-DENABLE_PULSE=Off"
             # Bare -lc++ (not via NIX_LDFLAGS — see preConfigure) so the engine
             # cc driver detects a C++ link and pulls libc++/libc++abi/libunwind
