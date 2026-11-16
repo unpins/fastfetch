@@ -459,11 +459,13 @@
                 (old.propagatedBuildInputs or [ ]);
             });
           };
-          # ImageMagick: cortar 19 codec supports pra evitar a cadeia
-          # de overlays profunda (~10+ patches) requerida pra full-codec
-          # em musl-static. Ver
-          # [[feedback_pkgsstatic_imagemagick_chain_patches]] pra
-          # inventário. fastfetch precisa só de decode PNG/JPEG pra logo.
+          # ImageMagick decodes the image logo. PNG, JPEG, WebP, TIFF, HEIC
+          # and JPEG XL stay (nix-lib's libjxl/libheif fixes in codecFixes).
+          # SVG goes through ImageMagick's built-in renderer: librsvg would add
+          # 20 MB (28 -> 48 MB on x86_64, its pango/cairo/harfbuzz chain) for
+          # a terminal logo. The rest is cut: fonts, colour management and X11
+          # have no use for a logo, and the RAW/EXR/DjVu/JPEG 2000 chains
+          # don't build static without more overlays.
           imagemagickOverlay = final: prev: {
             imagemagick = (prev.imagemagick.override {
               bzip2Support = false;
@@ -471,19 +473,15 @@
               freetypeSupport = false;
               djvulibreSupport = false;
               lcms2Support = false;
+              librsvgSupport = false;
               openexrSupport = false;
-              libjxlSupport = false;
               liblqr1Support = false;
               libraqmSupport = false;
               librawSupport = false;
-              librsvgSupport = false;
-              libtiffSupport = false;
               libxml2Support = false;
               openjpegSupport = false;
-              libheifSupport = false;
               libX11Support = false;
               libXtSupport = false;
-              libwebpSupport = false;
               fftwSupport = false;
             }).overrideAttrs (old:
               # darwin: imagemagick still links libxml2.a (core config
@@ -532,8 +530,16 @@
               cmakeFlags = (old.cmakeFlags or [ ]) ++ [ "-DUHDR_ENABLE_INTRINSICS=0" ];
             });
           };
+          # nix-lib's per-library fixes for the codecs ImageMagick pulls (as
+          # chafa/flake.nix): libjxl lib-only, libheif decode-only.
+          codecFixes = final: prev: {
+            libjxl    = unpins-lib.lib.nativeFixes.libjxl    prev;
+            libheif   = unpins-lib.lib.nativeFixes.libheif   prev;
+            graphite2 = unpins-lib.lib.nativeFixes.graphite2 prev;
+          };
           p = pkgs.pkgsStatic.extend (final: prev:
             (ddcutilOverlay final prev)
+            // (codecFixes final prev)
             // (chafaOverlay final prev)
             // (imagemagickOverlay final prev)
             // (vulkanLoaderOverlay final prev)
@@ -634,6 +640,7 @@
             });
           pd = pkgs.pkgsStatic.extend (final: prev:
             (chafaOverlay final prev)
+            // (codecFixes final prev)
             // (imagemagickOverlay final prev)
             // (potraceOverlay final prev)
             # darwin meson-subsystem fixes (nixos-26.05): glib 2.88.1
@@ -647,7 +654,7 @@
             # (autotools) pulls glib; the rest are lazy if not in the closure.
             // {
               glib       = unpins-lib.lib.nativeFixes.glib       prev;
-              graphite2  = unpins-lib.lib.nativeFixes.graphite2  prev;
+              dav1d      = unpins-lib.lib.nativeFixes.dav1d      prev;
               fontconfig = unpins-lib.lib.nativeFixes.fontconfig prev;
               pango      = unpins-lib.lib.nativeFixes.pango      prev;
               cairo      = unpins-lib.lib.nativeFixes.cairo      prev;
