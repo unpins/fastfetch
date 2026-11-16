@@ -344,7 +344,10 @@
             src = graphicsgd-src;
             sourceRoot = "source/startup/internal/dlopen";
             nativeBuildInputs = [ pkgs.xxd ];
-            patches = [ ./patches/graphicsgd-dlopen-embedded-helper.patch ];
+            patches = [
+              ./patches/graphicsgd-dlopen-embedded-helper.patch
+              ./patches/graphicsgd-aarch64-trampoline-stub.patch
+            ];
             postPatch = ''
               # Embed both pre-built helpers via xxd -i. The static main
               # binary detects the host libc at first dlopen and extracts

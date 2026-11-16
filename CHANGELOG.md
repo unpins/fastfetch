@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- On Linux aarch64, the Vulkan module (`fastfetch -s Vulkan`) crashed the
+  program with a segmentation fault or an illegal instruction whenever a
+  Vulkan driver was installed. The machine code fastfetch generates at
+  runtime to call into the system's GPU libraries was wrong on aarch64; it
+  now reports the Vulkan version as it does on x86_64.
+
 ## [2.63.1-2] - 2026-09-26
 
 ### Fixed

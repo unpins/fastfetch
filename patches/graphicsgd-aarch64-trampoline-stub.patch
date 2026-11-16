@@ -1,0 +1,77 @@
+Fix the aarch64 trampoline stub that foreign_wrap() writes at runtime.
+
+Three of its hand-encoded instructions disagree with their comments:
+
+- `stp x29, x30, [sp, #-80]!` was encoded with -176 while the epilogue
+  frees 80, so every wrapped call leaked 96 bytes of stack.
+- the four `stp`/`ldp` pairs were encoded as x0/x3, x2/x5, x4/x7, x6/x9
+  instead of x0/x1 ... x6/x7: x1 was never saved across the
+  get_thread_slot() call, and the last `ldp` overwrote the slot index in
+  x9, so foreign_tramp indexed the TLS pool with garbage.
+
+The stubs are also written into an RWX page and run without
+__builtin___clear_cache. x86 keeps the instruction cache coherent with
+stores; aarch64 does not, so the CPU could fetch stale bytes. The
+GetProcAddress stub gets the same flush.
+
+On real arm64 hardware (Debian and Alpine chroots, Mesa lavapipe)
+`fastfetch -s Vulkan` died in every run, with SIGILL at a valid `stp` or
+SIGSEGV inside foreign_tramp. On x86_64 the flush compiles to nothing.
+
+--- a/dlopen.c
++++ b/dlopen.c
+@@ -597,15 +597,15 @@
+   int i = 0;
+ 
+   /* stp x29, x30, [sp, #-80]! - allocate frame and save fp/lr */
+-  WRITE32LE(stub + i, 0xa9b57bfd); i += 4;
++  WRITE32LE(stub + i, 0xa9bb7bfd); i += 4;
+   /* stp x0, x1, [sp, #16] */
+-  WRITE32LE(stub + i, 0xa9010fe0); i += 4;
++  WRITE32LE(stub + i, 0xa90107e0); i += 4;
+   /* stp x2, x3, [sp, #32] */
+-  WRITE32LE(stub + i, 0xa90217e2); i += 4;
++  WRITE32LE(stub + i, 0xa9020fe2); i += 4;
+   /* stp x4, x5, [sp, #48] */
+-  WRITE32LE(stub + i, 0xa9031fe4); i += 4;
++  WRITE32LE(stub + i, 0xa90317e4); i += 4;
+   /* stp x6, x7, [sp, #64] */
+-  WRITE32LE(stub + i, 0xa90427e6); i += 4;
++  WRITE32LE(stub + i, 0xa9041fe6); i += 4;
+ 
+   /* ldr x16, .Lget_slot - load get_thread_slot address */
+   WRITE32LE(stub + i, 0x58000110); i += 4;  /* ldr x16, [pc, #32] - adjusted later */
+@@ -616,13 +616,13 @@
+ 
+   /* Restore args */
+   /* ldp x0, x1, [sp, #16] */
+-  WRITE32LE(stub + i, 0xa9410fe0); i += 4;
++  WRITE32LE(stub + i, 0xa94107e0); i += 4;
+   /* ldp x2, x3, [sp, #32] */
+-  WRITE32LE(stub + i, 0xa94217e2); i += 4;
++  WRITE32LE(stub + i, 0xa9420fe2); i += 4;
+   /* ldp x4, x5, [sp, #48] */
+-  WRITE32LE(stub + i, 0xa9431fe4); i += 4;
++  WRITE32LE(stub + i, 0xa94317e4); i += 4;
+   /* ldp x6, x7, [sp, #64] */
+-  WRITE32LE(stub + i, 0xa94427e6); i += 4;
++  WRITE32LE(stub + i, 0xa9441fe6); i += 4;
+   /* ldp x29, x30, [sp], #80 - restore and deallocate */
+   WRITE32LE(stub + i, 0xa8c57bfd); i += 4;
+ 
+@@ -659,6 +659,7 @@
+   /* ldr x16 for tramp is at offset 56, tramp is at pool_start + 16 */
+   int off3 = (pool_start + 16 - 56) / 4;
+   WRITE32LE(stub + 56, 0x58000010 | (off3 << 5));
++  __builtin___clear_cache((char *)stub, (char *)stub + i);
+ 
+   return stub;
+ #else
+@@ -966,6 +967,7 @@
+   WRITE32LE(stub + i, 0xd503201f); i += 4;
+   /* literal: call_procaddr_and_wrap address */
+   WRITE64LE(stub + i, (uintptr_t)call_procaddr_and_wrap);
++  __builtin___clear_cache((char *)stub, (char *)stub + i + 8);
+ 
+   return stub;
+ #else
