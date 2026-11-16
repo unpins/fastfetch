@@ -52,7 +52,7 @@
       # swapped pkgs whose `pkgsStatic` IS the bitcode set, so the `p`/`pd`/
       # `dconfStatic`/`tlsTrampoline` derivations fold under the engine
       # automatically. The glibc/musl foreign-dlopen helpers stay off-engine
-      # (they use helperPkgs.stdenv / pkgsCross.musl64, not pkgsStatic) — they
+      # (they use helperPkgs.stdenv / muslCross, not pkgsStatic) — they
       # must remain real dynamic ELFs run as separate processes at runtime.
       engine = "unpin-llvm";
       smoke = [ "--version" ];
@@ -82,8 +82,8 @@
       build = pkgs:
         let
           # Native build (incl. CI's aarch64 arm runner): build==host, so
-          # legacyPackages.<system>. When cross-compiling (e.g. the local
-          # build-aarch64-linux helper on an x86_64 box), instantiate it as a
+          # legacyPackages.<system>. When cross-compiling (e.g. `nix build
+          # .#cross.aarch64` on an x86_64 box), instantiate it as a
           # *cross* set so its buildPackages tools (polyfill-glibc, ninja) run on
           # the build host while glibcHelper's fdlhelper still targets the host
           # arch. Plain nixpkgs, not the engine set: these stay real dynamic ELFs.
@@ -364,19 +364,10 @@
             '';
           };
 
-          # ddcutil em musl-static não builda upstream: autoconf detecta
-          # `malloc(0) == NULL` em musl como "broken malloc" e ativa
-          # `#define malloc rpl_malloc` em config.h, mas o gnulib que
-          # forneceria `rpl_malloc` não está no projeto — implicit-decl
-          # quebra o build. Fix clássico: dizer ao autoconf que o
-          # malloc do sistema é bom (musl segue POSIX, retornar NULL
-          # pra size==0 é permitido). Igual pra realloc.
-          # vulkan-loader 1.4.x em Linux faz `add_library(vulkan SHARED)`
-          # hardcoded (loader/CMakeLists.txt:418); opção `APPLE_STATIC_
-          # LOADER` é APPLE-only. Em musl-static, ld --shared explode com
-          # `R_X86_64_32 against hidden symbol __TMC_END__ in crtbeginT.o`
-          # (mesmo padrão de libyuv ver
-          # [[feedback_pkgsstatic_imagemagick_chain_patches]] #3).
+          # vulkan-loader 1.4.x hardcodes `add_library(vulkan SHARED)` on Linux
+          # (loader/CMakeLists.txt:418); `APPLE_STATIC_LOADER` is APPLE-only.
+          # Under musl-static the shared link fails with `R_X86_64_32 against
+          # hidden symbol __TMC_END__ in crtbeginT.o`.
           vulkanLoaderOverlay = final: prev: {
             vulkan-loader = prev.vulkan-loader.overrideAttrs (old: {
               patches = (old.patches or [ ]) ++ [ ./patches/vulkan-loader-static-library.patch ];
@@ -394,6 +385,11 @@
               patches = (old.patches or [ ]) ++ [ ./patches/ocl-icd-no-test-programs.patch ];
             });
           };
+          # ddcutil's autoconf sees musl's `malloc(0) == NULL` as a broken
+          # malloc and defines `malloc rpl_malloc`, but ships no gnulib to
+          # provide rpl_malloc, so the build fails on an implicit declaration.
+          # POSIX allows NULL for size 0; tell autoconf malloc and realloc are
+          # fine.
           ddcutilOverlay = final: prev: {
             ddcutil = prev.ddcutil.overrideAttrs (old: {
               configureFlags = (old.configureFlags or [ ]) ++ [
@@ -619,8 +615,8 @@
           # nixpkgs already wires a correct build-host CC_FOR_BUILD when
           # cross-compiling, so gate on native and leave cross alone. Every
           # real target (x86_64-darwin, and aarch64-darwin native on macos-14)
-          # is native, so this is identity on all of them — it only lets the
-          # local ../build-aarch64-darwin cross check run.
+          # is native, so this is identity on all of them — it only lets a
+          # local x86_64-darwin -> aarch64-darwin cross check run.
           withDarwinBuildCC = drv:
             if !(pkgs.pkgsStatic.stdenv.buildPlatform.canExecute
                    pkgs.pkgsStatic.stdenv.hostPlatform)
@@ -719,8 +715,8 @@
           # frameworks (CoreFoundation/IOKit/SystemConfiguration/...) from
           # apple-sdk + sysctl — no foreign-dlopen trampoline needed (the
           # darwin allowlist permits libSystem + frameworks dynamic per
-          # docs/dynamic-link-policy.md). Logo rendering keeps chafa +
-          # imagemagick (codec-trimmed overlay). MoltenVK — the only Vulkan
+          # docs/dynamic-link-policy.md). chafa and ImageMagick render the
+          # logo, linked statically (see below). MoltenVK — the only Vulkan
           # provider on darwin — has no pkgsStatic build (badPlatforms), so
           # the Vulkan device-name line is off; the GPU is still detected via
           # IOKit/Metal in fastfetch's apple GPU module.
@@ -799,9 +795,10 @@
           # moved libpulseaudio/dconf/libglvnd/xfconf from propagatedBuildInputs
           # to buildInputs, so the propagated-only filter above no longer caught
           # them. libpulseaudio in particular is meta.badPlatforms on
-          # musl-static (refuses to even evaluate). These are already disabled
-          # at the feature level (ENABLE_PULSE/DCONF/XFCONF=Off; dconf replaced
-          # by dconfStatic), so dropping the inputs is consistent, not new.
+          # musl-static (refuses to even evaluate). None is linked: PulseAudio
+          # and libglvnd are dlopen'ed from the host (their headers come from
+          # the plain pkgs set below), dconf is replaced by dconfStatic, and
+          # fastfetch 2.63.1 has no xfconf option.
           buildInputs = (builtins.filter
             (x: !(builtins.elem (x.pname or x.name or "") dropDeps))
             (old.buildInputs or [ ]))
@@ -823,11 +820,8 @@
               p.chafa.dev
               p.vulkan-loader.dev
               p.ocl-icd
-              # Round 9: libwayland-client static (resolveu crash em Wayland
-              # session via trampoline). Outras libs continuam via trampoline
-              # — chain-LTO transitive pra static-all não fechou em playground
-              # (overlay no pkgsStatic disparou rebuild de stdenv musl); fica
-              # como work pra nix-lib futuro.
+              # Linked statically: loaded through the trampoline,
+              # libwayland-client crashed in a Wayland session.
               p.wayland.dev
               # Headers and .pc only (OpenGL, Sound): both libraries are
               # dlopen'ed from the host through the trampoline, never linked.
@@ -879,21 +873,18 @@
             gtkLibs="$($PKG_CONFIG --static --libs-only-L gio-2.0 gio-unix-2.0 sqlite3) $($PKG_CONFIG --static --libs-only-l gio-2.0 gio-unix-2.0 sqlite3)"
             export NIX_LDFLAGS="$NIX_LDFLAGS -L${dconfStatic}/lib -l:libdconfsettings.a -l:libdconf-engine.a -l:libdconf-gdbus-thread.a -l:libdconf-common.a -l:libgvdb.a -l:libdconf-shm.a $gtkLibs"
           '';
-          # Round 9: -l:libwayland-client.a força static-pull mesmo com
-          # BINARY_LINK_TYPE=dlopen (CMake default, mantido). Resolve crash
-          # de libwayland-client carregado via trampoline em sessão Wayland.
-          # libffi: dep transitive de libwayland (protocol marshalling).
-          # Trampoline continua pra libvulkan/libOpenCL/libdbus/libchafa/etc.
+          # The trampoline archive wraps dlopen/dlsym/dlclose/dlerror, so the
+          # host libraries fastfetch still dlopen's (Vulkan, OpenCL, EGL, GLX,
+          # PulseAudio, NVML, MTML) load through it. libwayland-client is
+          # linked statically even under BINARY_LINK_TYPE=dlopen (see
+          # buildInputs); libffi is its protocol-marshalling dependency.
           NIX_LDFLAGS = "-L${tlsTrampoline}/lib -l:foreign_dlopen.a -l:libwayland-client.a -lffi --wrap=dlopen --wrap=dlsym --wrap=dlclose --wrap=dlerror";
           cmakeFlags = (dropCustomIdsPaths (old.cmakeFlags or [ ])) ++ [
             "-DENABLE_EMBEDDED_PCIIDS=On"
             "-DENABLE_EMBEDDED_AMDGPUIDS=On"
-            # Round 8: ICD-loader status pending validation. Round 7 verified
-            # __wrap_dlopen/dlsym return valid pointers, but the first call
-            # via the returned pointer SIGSEGV'd at si_addr=0xfffffffffffffffe
-            # (TLS slot the lib expected but musl never set up). Round 8's
-            # trampoline switches FS via arch_prctl on every call so libvulkan
-            # sees a "real" glibc TLS at call time. Smoke target.
+            # Host driver libraries, dlopen'ed through the trampoline: each
+            # call switches to the helper's glibc (or musl) TLS, so the
+            # library sees the TLS it was built for.
             "-DENABLE_VULKAN=On"
             "-DENABLE_OPENCL=On"
             "-DENABLE_EGL=On"
@@ -945,8 +936,11 @@
             (x: !(builtins.elem (x.pname or x.name or "") dropDeps))
             (old.propagatedBuildInputs or [ ]);
           # Same static deps as the primary Linux branch, minus vulkan-loader
-          # and ocl-icd (host-ICD; can't be static-linked). All others link
-          # their .a directly under BINARY_LINK_TYPE=static.
+          # and ocl-icd (host-ICD; can't be static-linked), the libglvnd and
+          # libpulseaudio headers (OpenGL and Sound are off here) and
+          # libxfce4util (upstream's de_linux.c stubs XFCE version detection
+          # out under FF_DISABLE_DLOPEN). All others link their .a directly
+          # under BINARY_LINK_TYPE=static.
           buildInputs = (builtins.filter
             (x: !(builtins.elem (x.pname or x.name or "") dropDeps))
             (old.buildInputs or [ ]))
