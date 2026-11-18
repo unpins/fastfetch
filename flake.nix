@@ -51,9 +51,9 @@
       # LTO into one static 0-DT_NEEDED binary. `build` receives an engine-
       # swapped pkgs whose `pkgsStatic` IS the bitcode set, so the `p`/`pd`/
       # `dconfStatic`/`tlsTrampoline` derivations fold under the engine
-      # automatically. The glibc/musl foreign-dlopen helpers stay off-engine
-      # (they use helperPkgs.stdenv / muslCross, not pkgsStatic) — they
-      # must remain real dynamic ELFs run as separate processes at runtime.
+      # automatically. The glibc/musl foreign-dlopen helpers are not in
+      # pkgsStatic: they must remain real dynamic ELFs, so they are compiled
+      # and linked by the engine's clang and lld directly (`mkHelper`).
       engine = "unpin-llvm";
       smoke = [ "--version" ];
       smokePattern = "fastfetch";
@@ -252,40 +252,99 @@
             else
               throw "unsupported arch for fdlhelper musl ld.so path";
 
+          # The two helpers are compiled and linked by the engine (clang +
+          # lld), not by a gcc. A hand-written `_start` stands in for the
+          # libc's Scrt1/crti/crtn, so no gcc-built object is linked in; the
+          # libc .so is only read for symbols at link time.
+          mt = unpins-lib.lib.llvmMultitool pkgs.stdenv.buildPlatform.system;
+          helperArch = if pkgs.stdenv.hostPlatform.isx86_64 then "x86_64" else "aarch64";
+          # The host arch's native glibc, for headers and the link-time
+          # libc.so.6. helperPkgs.glibc would be built by a cross gcc when
+          # cross-compiling.
+          targetPkgs = nixpkgs.legacyPackages.${pkgs.stdenv.hostPlatform.system};
+          startSrc = builtins.toFile "start.c" ''
+            #ifdef UNPIN_GLIBC
+            /* csu/start.S in its 2.34+ form: no init/fini, rtld_fini in rdx/x0. */
+            #if defined(__x86_64__)
+            __asm__(".text\n.global _start\n.type _start,@function\n_start:\n"
+                    " xor %ebp,%ebp\n mov %rdx,%r9\n pop %rsi\n mov %rsp,%rdx\n"
+                    " andq $-16,%rsp\n push %rax\n push %rsp\n xor %r8d,%r8d\n xor %ecx,%ecx\n"
+                    " mov main@GOTPCREL(%rip),%rdi\n call *__libc_start_main@GOTPCREL(%rip)\n hlt\n");
+            #elif defined(__aarch64__)
+            __asm__(".text\n.global _start\n.type _start,%function\n_start:\n"
+                    " mov x29,#0\n mov x30,#0\n mov x5,x0\n ldr x1,[sp]\n add x2,sp,#8\n mov x6,sp\n"
+                    " mov x3,#0\n mov x4,#0\n adrp x0,:got:main\n ldr x0,[x0,:got_lo12:main]\n"
+                    " bl __libc_start_main\n bl abort\n");
+            #endif
+            #else
+            /* musl's crt1.c + crt_arch.h. */
+            int main();
+            int __libc_start_main(int (*)(), int, char **, void (*)(void), void (*)(void), void (*)(void));
+            __attribute__((used, visibility("hidden"))) void _start_c(long *p)
+            {
+              __libc_start_main(main, p[0], (char **)(p + 1), 0, 0, 0);
+            }
+            #if defined(__x86_64__)
+            __asm__(".text\n.global _start\n_start:\n xor %rbp,%rbp\n mov %rsp,%rdi\n"
+                    " andq $-16,%rsp\n call _start_c\n hlt\n");
+            #elif defined(__aarch64__)
+            __asm__(".text\n.global _start\n.type _start,%function\n_start:\n"
+                    " mov x29,#0\n mov x30,#0\n mov x0,sp\n and sp,x0,#-16\n b _start_c\n");
+            #endif
+            #endif
+          '';
+          mkHelper = { libc, interp, cflags, libs, fixup ? "", extraInputs ? [ ] }:
+            helperPkgs.buildPackages.stdenvNoCC.mkDerivation {
+              pname = "graphicsgd-${libc}-helper";
+              version = "07c79b4";
+              dontUnpack = true;
+              nativeBuildInputs = extraInputs;
+              # The fixup must not rewrite the polyfilled ELF.
+              dontPatchELF = true;
+              dontStrip = true;
+              buildPhase = ''
+                export XDG_CACHE_HOME=$TMPDIR
+                cc="${mt} clang -target ${helperArch}-linux-${if libc == "glibc" then "gnu" else "musl"} -O2 -fPIE"
+                $cc ${cflags} -c ${helperSrc} -o helper.o
+                $cc ${cflags} -c ${startSrc} -o start.o
+                ${libs}
+                # sysv hash: polyfill-glibc crashes rebuilding a GNU hash
+                # table that holds no exported symbol (crt1's _IO_stdin_used
+                # used to be the one).
+                ${mt} ld.lld -pie -z now --hash-style=sysv --dynamic-linker ${interp} \
+                  -o fdlhelper start.o helper.o $libs
+                ${fixup}
+              '';
+              installPhase = ''
+                mkdir -p $out/bin
+                cp fdlhelper $out/bin/fdlhelper
+              '';
+              doInstallCheck = true;
+              installCheckPhase = ''
+                actual=$(${mt} readelf -p .interp $out/bin/fdlhelper | sed -n 's/.*\] *//p')
+                [ "$actual" = "${interp}" ] \
+                  || { echo "${libc} helper interpreter: $actual"; exit 1; }
+                ${mt} readelf -d $out/bin/fdlhelper | grep -q NEEDED \
+                  || { echo "${libc} helper is not dynamic"; exit 1; }
+              '';
+            };
+
           # glibcHelper: glibc-dynamic ELF embedded for the glibc-host path
-          # (Debian/Ubuntu/RHEL/Arch/Fedora/etc). Built against helperPkgs
-          # glibc 2.42+, then polyfilled down to a 2.17 floor (CentOS 7
-          # vintage). See [[feedback_polyfill_glibc_fixup_trap]] for why
-          # dontPatchELF/dontStrip are required.
-          glibcHelper = helperPkgs.stdenv.mkDerivation {
-            pname = "graphicsgd-glibc-helper";
-            version = "07c79b4";
-            dontUnpack = true;
-            nativeBuildInputs = [ polyfillGlibc helperPkgs.patchelf ];
-            dontPatchELF = true;
-            dontStrip = true;
-            buildPhase = ''
-              cp ${helperSrc} helper.c
-              $CC -pie -fPIC -O2 -o fdlhelper helper.c -lpthread -ldl
+          # (Debian/Ubuntu/RHEL/Arch/Fedora/etc), its symbol versions lowered
+          # to the 2.17 floor by polyfill-glibc. The engine's clang has no
+          # glibc headers; its resource dir comes from the musl target.
+          glibcHelper = mkHelper {
+            libc = "glibc";
+            interp = systemLdSoGlibc;
+            cflags = "-DUNPIN_GLIBC -resource-dir $(${mt} clang -target ${helperArch}-linux-musl -print-resource-dir)"
+              + " -isystem ${targetPkgs.glibc.dev}/include -isystem ${targetPkgs.linuxHeaders}/include";
+            libs = "libs=${targetPkgs.glibc}/lib/libc.so.6";
+            extraInputs = [ polyfillGlibc ];
+            fixup = ''
               polyfill-glibc --target-glibc=2.17 fdlhelper
-              patchelf --set-interpreter ${systemLdSoGlibc} --remove-rpath fdlhelper
-            '';
-            installPhase = ''
-              mkdir -p $out/bin
-              cp fdlhelper $out/bin/fdlhelper
-            '';
-            doInstallCheck = true;
-            installCheckPhase = ''
-              file $out/bin/fdlhelper | grep -q 'dynamically linked' \
-                || { echo "glibcHelper NOT dynamic: $(file $out/bin/fdlhelper)"; exit 1; }
-              actual=$(patchelf --print-interpreter $out/bin/fdlhelper)
-              [ "$actual" = "${systemLdSoGlibc}" ] \
-                || { echo "interpreter not patched: $actual"; exit 1; }
-              if polyfill-glibc --print-imports $out/bin/fdlhelper \
-                  | grep -qE 'GLIBC_2\.(1[89]|[2-9][0-9])'; then
+              if polyfill-glibc --print-imports fdlhelper | grep -qE 'GLIBC_2\.(1[89]|[2-9][0-9])'; then
                 echo "polyfill failed: >=2.18 symbols still present:"
-                polyfill-glibc --print-imports $out/bin/fdlhelper \
-                  | grep -E 'GLIBC_2\.(1[89]|[2-9][0-9])'
+                polyfill-glibc --print-imports fdlhelper | grep -E 'GLIBC_2\.(1[89]|[2-9][0-9])'
                 exit 1
               fi
             '';
@@ -294,33 +353,28 @@
           # muslHelper: musl-dynamic ELF embedded for the musl-host path
           # (Alpine, Chimera, Void-musl, etc). No polyfill needed — musl pledges
           # ABI stability across releases, so a 1.2.x helper runs on any Alpine
-          # 3.16+ vintage.
-          muslCross =
-            if pkgs.stdenv.hostPlatform.isx86_64 then pkgs.pkgsCross.musl64
-            else pkgs.pkgsCross.aarch64-multiplatform-musl;
-          muslHelper = muslCross.stdenv.mkDerivation {
-            pname = "graphicsgd-musl-helper";
-            version = "07c79b4";
-            dontUnpack = true;
-            nativeBuildInputs = [ muslCross.buildPackages.patchelf ];
-            dontPatchELF = true;
-            dontStrip = true;
-            buildPhase = ''
-              cp ${helperSrc} helper.c
-              $CC -pie -fPIC -O2 -o fdlhelper helper.c -lpthread -ldl
-              patchelf --set-interpreter ${systemLdSoMusl} --remove-rpath fdlhelper
-            '';
-            installPhase = ''
-              mkdir -p $out/bin
-              cp fdlhelper $out/bin/fdlhelper
-            '';
-            doInstallCheck = true;
-            installCheckPhase = ''
-              file $out/bin/fdlhelper | grep -q 'dynamically linked' \
-                || { echo "muslHelper NOT dynamic"; exit 1; }
-              actual=$(patchelf --print-interpreter $out/bin/fdlhelper)
-              [ "$actual" = "${systemLdSoMusl}" ] \
-                || { echo "musl interp not patched: $actual"; exit 1; }
+          # 3.16+ vintage. Linked against a `libc.so` stub of the symbols it
+          # imports (musl's loader serves that name itself); `stderr` is the
+          # only data symbol, and an import not listed fails the build.
+          muslHelper = mkHelper {
+            libc = "musl";
+            interp = systemLdSoMusl;
+            cflags = "";
+            libs = ''
+              data=" stderr "
+              funcs=" __libc_start_main dlclose dlerror dlopen dlsym fprintf pthread_attr_destroy pthread_attr_init pthread_attr_setstacksize pthread_create pthread_detach pthread_mutex_init pthread_mutex_lock pthread_mutex_unlock sem_init sem_post sem_wait "
+              {
+                printf -- '--- !ifs-v1\nIfsVersion: 3.0\nSoName: libc.so\n'
+                printf 'Target: { ObjectFormat: ELF, Arch: ${if helperArch == "x86_64" then "x86_64" else "AArch64"}, Endianness: little, BitWidth: 64 }\nSymbols:\n'
+                for s in $(${mt} nm -u helper.o start.o | awk '$1 == "U" && $2 != "main" { print $2 }' | sort -u); do
+                  case "$data" in *" $s "*) echo "  - { Name: $s, Type: Object, Size: 8 }"; continue;; esac
+                  case "$funcs" in *" $s "*) echo "  - { Name: $s, Type: Func }"; continue;; esac
+                  echo "musl helper imports $s: classify it in muslHelper" >&2; exit 1
+                done
+                echo '...'
+              } > libc.ifs
+              ${mt} ifs --input-format=IFS --output-elf=libc.so libc.ifs
+              libs=libc.so
             '';
           };
 
