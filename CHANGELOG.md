@@ -22,6 +22,9 @@
   Vulkan driver was installed. The machine code fastfetch generates at
   runtime to call into the system's GPU libraries was wrong on aarch64; it
   now reports the Vulkan version as it does on x86_64.
+- fastfetch was compiled without optimization and with its debug assertions
+  on, on every platform: `fastfetch --version` printed `2.63.1-debug`. It is
+  now an optimized release build, as upstream intends.
 
 ## [2.63.1-2] - 2026-09-26
 

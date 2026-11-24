@@ -725,6 +725,17 @@
             }
           );
 
+          # MagickCore.pc's static closure (libheif, libde265, libjxl) names
+          # -lc++, which the pkg-config calls below put in NIX_LDFLAGS. The
+          # wrapper turns it into -Wl,-lc++, which no link resolves until the
+          # target's bare -lc++ (CMAKE_EXE_LINKER_FLAGS) brings the C++ runtime
+          # — so CMake's compiler-id link failed, the compiler came out
+          # "unknown", and Release got neither -O3 nor -DNDEBUG (fastfetch
+          # reported itself as "-debug"). Drop it; the bare one does the job.
+          dropLcxx = ''
+            NIX_LDFLAGS=$(for w in $NIX_LDFLAGS; do [ "$w" = -lc++ ] || printf '%s ' "$w"; done)
+            export NIX_LDFLAGS
+          '';
           # The foreign-dlopen TLS-swap trampoline only has get_tls() asm and
           # ld.so paths for x86_64 + aarch64 (helper.c #errors on any other
           # arch, systemLdSo{Glibc,Musl} throw). The secondary cross targets
@@ -813,6 +824,7 @@
             libs="$($PKG_CONFIG --static --libs-only-L $pcs) $($PKG_CONFIG --static --libs-only-l $pcs)"
             fws="$($PKG_CONFIG --static --libs-only-other $pcs | grep -oE 'framework[ ,][A-Za-z0-9_]+' | sed -E 's/^framework[ ,]/-framework /' | sort -u | tr '\n' ' ')"
             export NIX_LDFLAGS="$NIX_LDFLAGS $libs $fws"
+            ${dropLcxx}
           '';
           cmakeFlags = (old.cmakeFlags or [ ]) ++ [
             "-DBINARY_LINK_TYPE=dynamic"
@@ -926,6 +938,7 @@
             # bare `pkg-config` isn't on PATH in pkgsStatic.)
             gtkLibs="$($PKG_CONFIG --static --libs-only-L gio-2.0 gio-unix-2.0 sqlite3) $($PKG_CONFIG --static --libs-only-l gio-2.0 gio-unix-2.0 sqlite3)"
             export NIX_LDFLAGS="$NIX_LDFLAGS -L${dconfStatic}/lib -l:libdconfsettings.a -l:libdconf-engine.a -l:libdconf-gdbus-thread.a -l:libdconf-common.a -l:libgvdb.a -l:libdconf-shm.a $gtkLibs"
+            ${dropLcxx}
           '';
           # The trampoline archive wraps dlopen/dlsym/dlclose/dlerror, so the
           # host libraries fastfetch still dlopen's (Vulkan, OpenCL, EGL, GLX,
@@ -1033,6 +1046,7 @@
             # (which is what pulls the c++/c++abi/unwind group). -lstdc++ isn't
             # in the sysroot either. dconf/gtk -L/-l still ride NIX_LDFLAGS fine.
             export NIX_LDFLAGS="$NIX_LDFLAGS -L${dconfStatic}/lib -l:libdconfsettings.a -l:libdconf-engine.a -l:libdconf-gdbus-thread.a -l:libdconf-common.a -l:libgvdb.a -l:libdconf-shm.a $gtkLibs"
+            ${dropLcxx}
           '';
           cmakeFlags = (dropCustomIdsPaths (old.cmakeFlags or [ ])) ++ [
             # link our static .a deps into the binary instead of dlopen'ing
